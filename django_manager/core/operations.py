@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
+import importlib.util
+
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
@@ -58,16 +60,44 @@ class ProjectConfig:
 # ── uv detection ────────────────────────────────────────────────────────────
 
 def uv_available() -> bool:
-    return shutil.which("uv") is not None
+    return shutil.which("uv") is not None or importlib.util.find_spec("uv") is not None
 
 
-def uv_path() -> str:
+def uv_cmd(venv_path: Optional[Path] = None, ensure: bool = False) -> list[str]:
+    if venv_path:
+        venv_uv = _venv_bin(venv_path, "uv")
+        if venv_uv and venv_uv.exists():
+            return [str(venv_uv)]
+        if _venv_has_module(venv_path, "uv"):
+            return [str(venv_python(venv_path)), "-m", "uv"]
+
     path = shutil.which("uv")
-    if not path:
+    if path:
+        return [path]
+
+    compiled = getattr(sys, "frozen", False) or bool(globals().get("__compiled__", False))
+    if not compiled:
+        if importlib.util.find_spec("uv") is not None:
+            return [sys.executable, "-m", "uv"]
+
+    if ensure:
+        # Try installing uv into the project venv first, otherwise current env.
+        if venv_path and venv_python(venv_path).exists():
+            result = _pip_install_uv(venv_python(venv_path))
+            if result.returncode == 0:
+                return uv_cmd(venv_path=venv_path, ensure=False)
+        if not compiled:
+            result = _pip_install_uv(Path(sys.executable))
+            if result.returncode == 0:
+                return uv_cmd(venv_path=None, ensure=False)
         raise FileNotFoundError(
-            "uv not found. Install via: curl -LsSf https://astral.sh/uv/install.sh | sh"
+            "uv not found and auto-install failed. Install with: pip install uv "
+            "(or winget install --id=astral-sh.uv -e)"
         )
-    return path
+
+    raise FileNotFoundError(
+        "uv not found. Install with: pip install uv (or winget install --id=astral-sh.uv -e)"
+    )
 
 
 # ── Project creation — async step generator ─────────────────────────────────
@@ -79,7 +109,7 @@ async def create_project(
     Yields (step_id, StepResult) tuples as each step completes.
     Steps: mkdir, venv, activate, install, startproject, lockfile
     """
-    uv = uv_path()
+    uv = uv_cmd(ensure=True)
 
     # 1. Create directory
     try:
@@ -98,7 +128,7 @@ async def create_project(
 
     # 2. Create venv
     result = await _run(
-        [uv, "venv", "--python", cfg.python_ver, str(cfg.venv_path)],
+        [*uv, "venv", "--python", cfg.python_ver, str(cfg.venv_path)],
         cwd=cfg.path,
     )
     yield "venv", StepResult(
@@ -125,7 +155,7 @@ async def create_project(
         return
 
     result = await _run(
-        [uv, "pip", "install", f"django=={cfg.django_ver}"],
+        [*uv, "pip", "install", f"django=={cfg.django_ver}"],
         cwd=cfg.path,
         env=_venv_env(cfg),
     )
@@ -161,7 +191,7 @@ async def create_project(
         p for p in cfg.packages if p != "django"
     ]
     result = await _run(
-        [uv, "add", *packages],
+        [*uv, "add", *packages],
         cwd=cfg.path,
         env=_venv_env(cfg),
     )
@@ -173,7 +203,7 @@ async def create_project(
         )
         return
 
-    result = await _run([uv, "lock"], cwd=cfg.path, env=_venv_env(cfg))
+    result = await _run([*uv, "lock"], cwd=cfg.path, env=_venv_env(cfg))
     yield "lockfile", StepResult(
         ok=result.returncode == 0,
         message="pyproject.toml + uv.lock generated" if result.returncode == 0 else "Lock generation failed",
@@ -245,9 +275,9 @@ async def uv_add_packages(
     packages: list[str],
     venv_path: Optional[Path] = None,
 ) -> subprocess.CompletedProcess:
-    uv = uv_path()
+    uv = uv_cmd(venv_path=venv_path, ensure=True)
     env = venv_env_from_path(venv_path) if venv_path else None
-    return await _run([uv, "add", *packages], cwd=project_path, env=env)
+    return await _run([*uv, "add", *packages], cwd=project_path, env=env)
 
 
 async def uv_remove_packages(
@@ -255,18 +285,18 @@ async def uv_remove_packages(
     packages: list[str],
     venv_path: Optional[Path] = None,
 ) -> subprocess.CompletedProcess:
-    uv = uv_path()
+    uv = uv_cmd(venv_path=venv_path, ensure=True)
     env = venv_env_from_path(venv_path) if venv_path else None
-    return await _run([uv, "remove", *packages], cwd=project_path, env=env)
+    return await _run([*uv, "remove", *packages], cwd=project_path, env=env)
 
 
 async def uv_list_packages(
     project_path: Path,
     venv_path: Optional[Path] = None,
 ) -> list[str]:
-    uv = uv_path()
+    uv = uv_cmd(venv_path=venv_path, ensure=True)
     env = venv_env_from_path(venv_path) if venv_path else None
-    result = await _run([uv, "pip", "list", "--format=freeze"], cwd=project_path, env=env)
+    result = await _run([*uv, "pip", "list", "--format=freeze"], cwd=project_path, env=env)
     if result.returncode == 0 and result.stdout.strip():
         pkgs: list[str] = []
         for line in result.stdout.splitlines():
@@ -380,6 +410,32 @@ def venv_python(venv_path: Path) -> Path:
     else:
         candidate = venv_path / "bin" / "python"
     return candidate if candidate.exists() else Path(sys.executable)
+
+
+def _venv_bin(venv_path: Path, name: str) -> Optional[Path]:
+    if os.name == "nt":
+        candidate = venv_path / "Scripts" / f"{name}.exe"
+    else:
+        candidate = venv_path / "bin" / name
+    return candidate if candidate.exists() else None
+
+
+def _venv_has_module(venv_path: Path, module: str) -> bool:
+    win_path = venv_path / "Lib" / "site-packages" / module
+    if win_path.exists():
+        return True
+    for candidate in venv_path.glob(f"lib/python*/site-packages/{module}"):
+        if candidate.exists():
+            return True
+    return False
+
+
+def _pip_install_uv(python_path: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(python_path), "-m", "pip", "install", "uv"],
+        capture_output=True,
+        text=True,
+    )
 
 
 def get_python_version(venv_path: Path) -> Optional[str]:
