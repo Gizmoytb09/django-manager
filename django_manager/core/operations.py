@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None  # type: ignore
+
 
 # ── Result types ────────────────────────────────────────────────────────────
 
@@ -233,6 +238,68 @@ async def start_runserver(
     return proc
 
 
+# ── Package helpers (uv) ─────────────────────────────────────────────────────
+
+async def uv_add_packages(
+    project_path: Path,
+    packages: list[str],
+    venv_path: Optional[Path] = None,
+) -> subprocess.CompletedProcess:
+    uv = uv_path()
+    env = venv_env_from_path(venv_path) if venv_path else None
+    return await _run([uv, "add", *packages], cwd=project_path, env=env)
+
+
+async def uv_remove_packages(
+    project_path: Path,
+    packages: list[str],
+    venv_path: Optional[Path] = None,
+) -> subprocess.CompletedProcess:
+    uv = uv_path()
+    env = venv_env_from_path(venv_path) if venv_path else None
+    return await _run([uv, "remove", *packages], cwd=project_path, env=env)
+
+
+async def uv_list_packages(
+    project_path: Path,
+    venv_path: Optional[Path] = None,
+) -> list[str]:
+    uv = uv_path()
+    env = venv_env_from_path(venv_path) if venv_path else None
+    result = await _run([uv, "pip", "list", "--format=freeze"], cwd=project_path, env=env)
+    if result.returncode == 0 and result.stdout.strip():
+        pkgs: list[str] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            name = line.split("==", 1)[0]
+            pkgs.append(name)
+        return pkgs
+    return read_project_dependencies(project_path)
+
+
+def read_project_dependencies(project_path: Path) -> list[str]:
+    pyproject = project_path / "pyproject.toml"
+    if pyproject.exists() and tomllib is not None:
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            project = data.get("project", {})
+            deps = list(project.get("dependencies") or [])
+            return deps
+        except Exception:
+            pass
+    req = project_path / "requirements.txt"
+    if req.exists():
+        deps: list[str] = []
+        for line in req.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            deps.append(line)
+        return deps
+    return []
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 async def _run(
@@ -305,3 +372,78 @@ def _python_bin(project_path: Path, venv_path: Optional[Path] = None) -> Path:
     if candidate.exists():
         return candidate
     return Path(sys.executable)
+
+
+def venv_python(venv_path: Path) -> Path:
+    if os.name == "nt":
+        candidate = venv_path / "Scripts" / "python.exe"
+    else:
+        candidate = venv_path / "bin" / "python"
+    return candidate if candidate.exists() else Path(sys.executable)
+
+
+def get_python_version(venv_path: Path) -> Optional[str]:
+    uv = shutil.which("uv")
+    candidates = []
+    if uv:
+        candidates.append([uv, "run", "--python", str(venv_python(venv_path)), "python", "--version"])
+    candidates.append([str(venv_python(venv_path)), "--version"])
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception:
+            continue
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode != 0 or not output:
+            continue
+        if output.lower().startswith("python"):
+            parts = output.split()
+            if len(parts) >= 2:
+                return parts[1].strip()
+    return None
+
+
+def get_package_version(venv_path: Path, package: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            [str(venv_python(venv_path)), "-m", "pip", "show", package],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in (result.stdout or "").splitlines():
+        if line.lower().startswith("version:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def list_installed_packages(venv_path: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [str(venv_python(venv_path)), "-m", "pip", "list", "--format=freeze"],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    pkgs: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name = line.split("==", 1)[0]
+        pkgs.append(name)
+    return pkgs
+
+
+def pip_uninstall_packages(venv_path: Path, packages: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(venv_python(venv_path)), "-m", "pip", "uninstall", "-y", *packages],
+        capture_output=True,
+        text=True,
+    )

@@ -3,14 +3,8 @@ Django Manager — Open Existing Project
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore
+from typing import Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal
@@ -18,7 +12,12 @@ from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Button, DirectoryTree, Input, Static
 
-from ..core.operations import ProjectConfig
+from ..core.operations import (
+    ProjectConfig,
+    get_package_version,
+    get_python_version,
+    list_installed_packages,
+)
 
 
 class OpenProjectScreen(Screen):
@@ -56,24 +55,26 @@ class OpenProjectScreen(Screen):
     #open-venv     { color: #3a3a3a; height: auto; margin-bottom: 1; }
     #open-error { color: #e06c75; height: auto; margin-top: 1; }
 
-    #open-actions { height: 3; margin-top: 1; }
+    #open-actions { height: 3; margin-top: 1; align: center middle; }
     #btn-open {
-        width: 1fr;
+        width: 18;
         background: #092E20;
         color: #44B78B;
         border: tall #44B78B;
         text-style: bold;
         content-align: center middle;
-        margin-right: 1;
+        padding: 0 2;
+        margin-right: 2;
     }
     #btn-open:hover { background: #0d3d28; border: tall #6ddba8; color: #6ddba8; }
 
     #btn-cancel {
-        width: 1fr;
+        width: 18;
         background: #111111;
         color: #888888;
         border: tall #1a1a1a;
         content-align: center middle;
+        padding: 0 2;
     }
     #btn-cancel:hover { background: #151515; border: tall #2a2a2a; color: #aaaaaa; }
     """
@@ -246,7 +247,7 @@ class OpenProjectScreen(Screen):
     def _build_config(self, root: Path) -> ProjectConfig:
         name = root.name
         location = root.parent
-        packages, python_req, django_ver = self._read_project_metadata(root)
+        packages, python_req, django_ver = self._read_project_metadata(root, self.selected_venv)
         return ProjectConfig(
             name=name,
             location=location,
@@ -257,40 +258,15 @@ class OpenProjectScreen(Screen):
             venv_dir=self.selected_venv,
         )
 
-    def _read_project_metadata(self, root: Path) -> Tuple[list[str], Optional[str], Optional[str]]:
-        pyproject = root / "pyproject.toml"
-        if pyproject.exists() and tomllib is not None:
-            try:
-                data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-                project = data.get("project", {})
-                deps = list(project.get("dependencies") or [])
-                return deps, project.get("requires-python"), _extract_django_version(deps)
-            except Exception:
-                pass
-
-        req = root / "requirements.txt"
-        if req.exists():
-            deps = _parse_requirements(req.read_text(encoding="utf-8"))
-            return deps, None, _extract_django_version(deps)
-        return [], None, None
-
-
-def _parse_requirements(text: str) -> list[str]:
-    deps: list[str] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        deps.append(line)
-    return deps
-
-
-def _extract_django_version(deps: Iterable[str]) -> Optional[str]:
-    for dep in deps:
-        if dep.lower().startswith("django"):
-            match = re.search(r"(\\d+\\.\\d+(?:\\.\\d+)?)", dep)
-            return match.group(1) if match else dep
-    return None
+    def _read_project_metadata(
+        self, root: Path, venv_path: Optional[Path]
+    ) -> Tuple[list[str], Optional[str], Optional[str]]:
+        if not venv_path:
+            return [], None, None
+        python_ver = get_python_version(venv_path)
+        django_ver = get_package_version(venv_path, "django")
+        packages = list_installed_packages(venv_path)
+        return packages, python_ver, django_ver
 
 
 def _is_venv_dir(path: Path) -> bool:

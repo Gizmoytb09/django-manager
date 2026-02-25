@@ -20,7 +20,17 @@ from textual.message import Message
 from textual.widgets import Button, Input, Label, Static
 
 from ..core.config import APP_VERSION
-from ..core.operations import ProjectConfig, run_django_command, start_runserver
+from ..core.settings import load_settings
+from ..core.operations import (
+    ProjectConfig,
+    read_project_dependencies,
+    run_django_command,
+    start_runserver,
+    pip_uninstall_packages,
+    uv_add_packages,
+    uv_list_packages,
+    uv_remove_packages,
+)
 
 # ── Rich markup helpers ──────────────────────────────────────────────────────
 
@@ -156,6 +166,9 @@ class ServerPanel(Vertical):
     """
 
     running: reactive[bool] = reactive(False)
+    show_timestamps: reactive[bool] = reactive(True)
+    show_levels: reactive[bool] = reactive(True)
+    auto_scroll: reactive[bool] = reactive(True)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="srv-header"):
@@ -181,6 +194,10 @@ class ServerPanel(Vertical):
             case "btn-srv-restart": self.post_message(self.RestartServer())
 
     def append_line(self, time: str, level: str, msg: str) -> None:
+        if not self.show_timestamps:
+            time = ""
+        if not self.show_levels:
+            level = ""
         lvl_cls = {
             "OK": "srv-lv-ok", "INFO": "srv-lv-info",
             "WARN": "srv-lv-warn", "ERROR": "srv-lv-err",
@@ -196,7 +213,8 @@ class ServerPanel(Vertical):
         line.compose_add_child(Static(level, classes=f"srv-level {lvl_cls}"))
         line.compose_add_child(Static(msg,   classes="srv-msg", markup=True))
         scroll.mount(line)
-        scroll.scroll_end(animate=False)
+        if self.auto_scroll:
+            scroll.scroll_end(animate=False)
 
     def set_running(self, running: bool) -> None:
         self.running = running
@@ -258,16 +276,21 @@ class CommandPanel(Vertical):
                 "[#1e1e1e]── Output cleared ──────────────────────────────────[/]",
                 markup=True, classes="cmd-line",
             ))
+            if self.auto_scroll:
+                scroll.scroll_end(animate=False)
 
     def append(self, text: str, markup: bool = True) -> None:
         scroll = self.query_one("#cmd-scroll", ScrollableContainer)
         scroll.mount(Static(text, markup=markup, classes="cmd-line"))
-        scroll.scroll_end(animate=False)
+        if self.auto_scroll:
+            scroll.scroll_end(animate=False)
 
     def append_badges(self, *badges: tuple[str, str]) -> None:
         """badges = list of (label, kind) tuples."""
         row = "  ".join(_badge(label, kind) for label, kind in badges)
         self.append(row)
+
+    auto_scroll: reactive[bool] = reactive(True)
 
 
 # ── Input bar ────────────────────────────────────────────────────────────────
@@ -299,7 +322,7 @@ class InputBar(Horizontal):
     #ib-send {
         background: #092E20; color: #44B78B;
         border: tall #1a3d28; height: 3;
-        min-width: 10; content-align: center middle;
+        min-width: 10; content-align: center middle; padding: 0 2;
     }
     #ib-send:hover { background: #0d3d28; border: tall #44B78B; }
     """
@@ -344,6 +367,16 @@ class DashboardScreen(Screen):
     ]
 
     active_view: reactive[str] = reactive("server")
+    layout_mode: reactive[str] = reactive("split")
+    sidebar_compact: reactive[bool] = reactive(False)
+    auto_switch_command: reactive[bool] = reactive(True)
+    show_project_path: reactive[bool] = reactive(True)
+    show_server_timestamps: reactive[bool] = reactive(True)
+    show_server_levels: reactive[bool] = reactive(True)
+    show_running_badge: reactive[bool] = reactive(True)
+    show_command_welcome: reactive[bool] = reactive(True)
+    server_auto_scroll: reactive[bool] = reactive(True)
+    command_auto_scroll: reactive[bool] = reactive(True)
 
     CSS = """
     DashboardScreen { background: #0a0a0a; layout: vertical; }
@@ -367,7 +400,6 @@ class DashboardScreen(Screen):
         color: #3a3a3a;
         content-align: left middle;
     }
-    #dh-subline b { color: #888888; }
     .dh-badge   { height: 3; padding: 0 1; content-align: center middle; margin: 0 1; }
     .dh-badge-blue   { background: #0d1f2d; color: #61afef; border: tall #1a3a50; }
     .dh-badge-green  { background: #0a1f14; color: #44B78B; border: tall #092E20; }
@@ -385,15 +417,25 @@ class DashboardScreen(Screen):
         padding: 0 2;
         align: left middle;
     }
-    #dash-spacer { width: 1fr; }
+    #dash-tabs {
+        width: 1fr;
+        layout: horizontal;
+        align: center middle;
+    }
+    #dash-actions {
+        width: auto;
+        layout: horizontal;
+        align: right middle;
+    }
     .view-tab {
         height: 3;
         padding: 0 2;
-        margin-right: 1;
+        margin: 0 1;
         background: #111111;
         color: #555555;
         border: tall #1a1a1a;
         content-align: center middle;
+        min-width: 12;
     }
     .view-tab--active {
         background: #0a1f14;
@@ -416,7 +458,8 @@ class DashboardScreen(Screen):
     def compose(self) -> ComposeResult:
         project_name = self.cfg.name if self.cfg else "my_project"
         project_path = str(self.cfg.path) if self.cfg else "~/projects/my_project"
-        py_ver       = self.cfg.python_ver if self.cfg else "3.12"
+        py_ver       = _detect_python_version(self.cfg.venv_path if self.cfg else None,
+                                             self.cfg.python_ver if self.cfg else "3.12")
         dj_ver       = _detect_django_version(self.cfg.venv_path if self.cfg else None,
                                              self.cfg.django_ver if self.cfg else "5.0")
 
@@ -429,17 +472,18 @@ class DashboardScreen(Screen):
                 markup=True,
             )
             yield Static(
-                f"[#3a3a3a]Project:[/] [b]{project_name}[/]   "
-                f"[#3a3a3a]Path:[/] [b]{project_path}[/]",
+                f"[#3a3a3a]Project:[/] [bold #888888]{project_name}[/]   "
+                f"[#3a3a3a]Path:[/] [bold #888888]{project_path}[/]",
                 id="dh-subline",
                 markup=True,
             )
         with Horizontal(id="dash-view"):
-            yield Button("Server", id="view-server", classes="view-tab view-tab--active")
-            yield Button("Command", id="view-command", classes="view-tab")
-            yield Static("", id="dash-spacer")
-            yield Static("● RUNNING :8000", id="server-running-badge")
-            yield Button("⌂ Home", id="btn-go-home", classes="btn-action")
+            with Horizontal(id="dash-tabs"):
+                yield Button("Server", id="view-server", classes="view-tab view-tab--active")
+                yield Button("Command", id="view-command", classes="view-tab")
+            with Horizontal(id="dash-actions"):
+                yield Static("● RUNNING :8000", id="server-running-badge")
+                yield Button("⌂ Home", id="btn-go-home", classes="btn-action")
 
         # Body
         with Horizontal(id="dash-body"):
@@ -450,17 +494,37 @@ class DashboardScreen(Screen):
                 yield InputBar()
 
     def on_mount(self) -> None:
-        # Hide server running badge initially
-        self.query_one("#server-running-badge").add_class("hidden")
+        self._load_settings()
         self._apply_responsive()
-        self._apply_view()
+        self._apply_layout()
+
+    def on_resume(self) -> None:
+        self._load_settings()
+        self._apply_layout()
+
+    def _load_settings(self) -> None:
+        settings = load_settings()
+        self.layout_mode = settings.layout_mode
+        self.sidebar_compact = settings.sidebar_compact
+        self.auto_switch_command = settings.auto_switch_command
+        self.show_project_path = settings.show_project_path
+        self.show_server_timestamps = settings.show_server_timestamps
+        self.show_server_levels = settings.show_server_levels
+        self.show_running_badge = settings.show_running_badge
+        self.show_command_welcome = settings.show_command_welcome
+        self.server_auto_scroll = settings.server_auto_scroll
+        self.command_auto_scroll = settings.command_auto_scroll
+        self._apply_preferences()
 
     def on_resize(self, event) -> None:  # type: ignore[override]
         self._apply_responsive()
+        self._apply_layout()
 
     def _apply_responsive(self) -> None:
         sidebar = self.query_one(Sidebar)
-        width = 18 if self.size.width < 100 else 22
+        width = 16 if self.sidebar_compact else 22
+        if self.size.width < 100:
+            width = 16 if self.sidebar_compact else 18
         sidebar.styles.width = width
         server_panel = self.query_one(ServerPanel)
         server_panel.styles.height = 12 if self.size.height < 35 else 16
@@ -472,6 +536,56 @@ class DashboardScreen(Screen):
         command.display = self.active_view == "command"
         self._set_view_tab("view-server", self.active_view == "server")
         self._set_view_tab("view-command", self.active_view == "command")
+
+    def _apply_layout(self) -> None:
+        view_bar = self.query_one("#dash-view")
+        server = self.query_one(ServerPanel)
+        command = self.query_one(CommandPanel)
+        if self.layout_mode == "tabs":
+            view_bar.display = True
+            server.styles.height = "1fr"
+            command.styles.height = "1fr"
+            self._apply_view()
+        else:
+            view_bar.display = False
+            server.display = True
+            command.display = True
+            self._apply_responsive()
+
+    def _apply_preferences(self) -> None:
+        server = self.query_one(ServerPanel)
+        command = self.query_one(CommandPanel)
+        server.show_timestamps = self.show_server_timestamps
+        server.show_levels = self.show_server_levels
+        server.auto_scroll = self.server_auto_scroll
+        command.auto_scroll = self.command_auto_scroll
+        self.query_one("#dh-subline").display = self.show_project_path
+        self._ensure_command_welcome()
+        self._set_running_badge(server.running)
+
+    def _ensure_command_welcome(self) -> None:
+        try:
+            self.query_one("#cmd-welcome").display = self.show_command_welcome
+            return
+        except Exception:
+            if not self.show_command_welcome:
+                return
+        panel = self.query_one(CommandPanel)
+        scroll = panel.query_one("#cmd-scroll", ScrollableContainer)
+        scroll.mount(Static(
+            "[#1e1e1e]── Django Manager ready ─────────────────────────────[/]\n"
+            "[#1e6e42]›[/] Type [bold #44B78B]django <command>[/] or [bold #56b6c2]manager <command>[/]",
+            id="cmd-welcome",
+            markup=True,
+            classes="cmd-line",
+        ))
+
+    def _set_running_badge(self, running: bool) -> None:
+        badge = self.query_one("#server-running-badge")
+        if not self.show_running_badge or not running:
+            badge.add_class("hidden")
+        else:
+            badge.remove_class("hidden")
 
     def _set_view_tab(self, tab_id: str, active: bool) -> None:
         tab = self.query_one(f"#{tab_id}", Button)
@@ -510,13 +624,17 @@ class DashboardScreen(Screen):
             case "Settings":
                 self._show_settings()
             case "Docs":
-                self._run_command("manager docs")
+                from .docs import DocsScreen
+                self.app.push_screen(DocsScreen())
             case "Add Package":
                 self._run_command("manager add")
             case "Lock File":
                 self._run_command("manager lock")
 
     def _run_command(self, raw: str) -> None:
+        if self.layout_mode == "tabs" and self.auto_switch_command:
+            self.active_view = "command"
+            self._apply_layout()
         self.run_worker(self._handle_command(raw), exclusive=False)
 
     def _show_shell_hint(self) -> None:
@@ -541,15 +659,8 @@ class DashboardScreen(Screen):
         panel.append_badges(("PACKAGES", "info"))
 
     def _show_settings(self) -> None:
-        panel = self.query_one(CommandPanel)
-        module, path = self._resolve_settings_module()
-        if module:
-            panel.append(f"[#56b6c2]Settings module:[/] [#44B78B]{module}[/]", markup=True)
-            if path:
-                panel.append(f"[#3a3a3a]Path:[/] [#555555]{path}[/]", markup=True)
-        else:
-            panel.append("[#e5c07b]Settings module not found (check manage.py).[/]", markup=True)
-        panel.append_badges(("SETTINGS", "info"))
+        from .settings import SettingsScreen
+        self.app.push_screen(SettingsScreen())
 
     def _resolve_settings_module(self) -> tuple[Optional[str], Optional[str]]:
         if not self.cfg:
@@ -574,7 +685,7 @@ class DashboardScreen(Screen):
 
         srv_panel = self.query_one(ServerPanel)
         srv_panel.set_running(True)
-        self.query_one("#server-running-badge").remove_class("hidden")
+        self._set_running_badge(True)
 
         self.query_one(CommandPanel).append_badges(
             ("RUNSERVER", "ok"),
@@ -609,7 +720,7 @@ class DashboardScreen(Screen):
 
         await self._server_proc.wait()
         srv_panel.set_running(False)
-        self.query_one("#server-running-badge").add_class("hidden")
+        self._set_running_badge(False)
         srv_panel.append_line(_ts(), "INFO", "Server stopped.")
 
     def _stop_server(self) -> None:
@@ -617,7 +728,7 @@ class DashboardScreen(Screen):
             self._server_proc.terminate()
             self._server_proc = None
         self.query_one(ServerPanel).set_running(False)
-        self.query_one("#server-running-badge").add_class("hidden")
+        self._set_running_badge(False)
 
     # ── Command input ─────────────────────────────────────────
 
@@ -679,7 +790,8 @@ class DashboardScreen(Screen):
         # ── manager <command> ─────────────────────────────────
         elif parts[0] == "manager":
             cmd = parts[1] if len(parts) > 1 else ""
-            await self._handle_manager_cmd(cmd, panel)
+            args = parts[2:] if len(parts) > 2 else []
+            await self._handle_manager_cmd(cmd, args, panel)
 
         else:
             panel.append(
@@ -688,7 +800,7 @@ class DashboardScreen(Screen):
             )
             panel.append_badges(("ERROR", "err"), ("unknown command", "neutral"))
 
-    async def _handle_manager_cmd(self, cmd: str, panel: CommandPanel) -> None:
+    async def _handle_manager_cmd(self, cmd: str, args: list[str], panel: CommandPanel) -> None:
         match cmd:
             case "docs":
                 panel.append("[bold #56b6c2]── DJANGO MANAGER COMMANDS ────────────────────[/]", markup=True)
@@ -696,7 +808,9 @@ class DashboardScreen(Screen):
                     ("manager create",   "Create a new Django project"),
                     ("manager open",     "Open an existing project"),
                     ("manager docs",     "Show this reference"),
-                    ("manager add",      "Add a package via uv"),
+                    ("manager add <pkg>", "Add a package via uv"),
+                    ("manager packages", "List installed packages"),
+                    ("manager remove",   "Remove packages (use --tui)"),
                     ("manager lock",     "Regenerate uv.lock"),
                     ("manager env",      "Show virtual environment info"),
                 ]
@@ -720,9 +834,87 @@ class DashboardScreen(Screen):
                 panel.append_badges(("ENV INFO", "info"))
 
             case "add":
-                panel.append("[#3a3a3a]Usage: manager add <package>[/]", markup=True)
-                panel.append("[#3a3a3a]Example: manager add djangorestframework[/]", markup=True)
-                panel.append_badges(("HINT", "warn"))
+                if not self.cfg:
+                    panel.append("[#e06c75]No project loaded.[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                pkgs = [a for a in args if not a.startswith("-")]
+                if not pkgs:
+                    panel.append("[#3a3a3a]Usage: manager add <package>[/]", markup=True)
+                    panel.append("[#3a3a3a]Example: manager add djangorestframework[/]", markup=True)
+                    panel.append_badges(("HINT", "warn"))
+                    return
+                panel.append(f"[#3a3a3a]Adding: {', '.join(pkgs)}[/]", markup=True)
+                try:
+                    result = await uv_add_packages(self.cfg.path, pkgs, venv_path=self.cfg.venv_path)
+                except FileNotFoundError as e:
+                    panel.append(f"[#e06c75]{e}[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+                for line in output.splitlines():
+                    panel.append(f"  [#555555]{line}[/]", markup=True)
+                if result.returncode == 0:
+                    self.cfg.packages = read_project_dependencies(self.cfg.path)
+                    panel.append_badges(("ADDED", "ok"))
+                else:
+                    panel.append_badges(("ERROR", "err"))
+
+            case "packages" | "list":
+                if not self.cfg:
+                    panel.append("[#e06c75]No project loaded.[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                panel.append("[#56b6c2]── INSTALLED PACKAGES ────────────────────────────[/]", markup=True)
+                try:
+                    pkgs = await uv_list_packages(self.cfg.path, venv_path=self.cfg.venv_path)
+                except FileNotFoundError as e:
+                    panel.append(f"[#e06c75]{e}[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                if pkgs:
+                    for pkg in pkgs:
+                        panel.append(f"  [#555555]{pkg}[/]", markup=True)
+                else:
+                    panel.append("  [#555555](no packages found)[/]", markup=True)
+                panel.append("[#1e1e1e]──────────────────────────────────────────────────[/]", markup=True)
+                panel.append_badges(("PACKAGES", "info"))
+
+            case "remove" | "delete":
+                if not self.cfg:
+                    panel.append("[#e06c75]No project loaded.[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                if "--tui" in args:
+                    from .package_remove import PackageRemoveScreen
+                    self.app.push_screen(PackageRemoveScreen(self.cfg))
+                    return
+                pkgs = [a for a in args if not a.startswith("-")]
+                if not pkgs:
+                    panel.append("[#3a3a3a]Usage: manager remove <package>[/]", markup=True)
+                    panel.append("[#3a3a3a]Tip: manager remove --tui[/]", markup=True)
+                    panel.append_badges(("HINT", "warn"))
+                    return
+                panel.append(f"[#3a3a3a]Removing: {', '.join(pkgs)}[/]", markup=True)
+                try:
+                    result = await uv_remove_packages(self.cfg.path, pkgs, venv_path=self.cfg.venv_path)
+                except FileNotFoundError as e:
+                    panel.append(f"[#e06c75]{e}[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+
+                if result.returncode != 0 and "pyproject.toml" in (result.stderr or ""):
+                    if self.cfg.venv_path.exists():
+                        result = pip_uninstall_packages(self.cfg.venv_path, pkgs)
+
+                output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+                for line in output.splitlines():
+                    panel.append(f"  [#555555]{line}[/]", markup=True)
+                if result.returncode == 0:
+                    self.cfg.packages = read_project_dependencies(self.cfg.path)
+                    panel.append_badges(("REMOVED", "ok"))
+                else:
+                    panel.append_badges(("ERROR", "err"))
 
             case "update":
                 panel.append("[#3a3a3a]Update deps is not wired yet.[/]", markup=True)
@@ -761,10 +953,10 @@ class DashboardScreen(Screen):
                 self.action_go_home()
             case "view-server":
                 self.active_view = "server"
-                self._apply_view()
+                self._apply_layout()
             case "view-command":
                 self.active_view = "command"
-                self._apply_view()
+                self._apply_layout()
 
     def action_go_home(self) -> None:
         self._stop_server()
@@ -806,4 +998,19 @@ def _detect_django_version(venv_path: Optional[Path], fallback: str) -> str:
                     return match.group(1)
         except Exception:
             continue
+    return fallback
+
+
+def _detect_python_version(venv_path: Optional[Path], fallback: str) -> str:
+    if not venv_path:
+        return fallback
+    cfg = venv_path / "pyvenv.cfg"
+    if cfg.exists():
+        try:
+            text = cfg.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"^version\\s*=\\s*([0-9.]+)\\s*$", text, re.M)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
     return fallback

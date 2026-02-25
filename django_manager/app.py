@@ -7,6 +7,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 
+from .core.settings import load_settings
 from .screens import HomeScreen
 
 
@@ -18,6 +19,7 @@ class DjangoManagerApp(App):
     CSS_PATH = Path(__file__).parent / "app.css"
 
     def on_mount(self) -> None:
+        self.settings = load_settings()
         self.push_screen(HomeScreen())
 
 

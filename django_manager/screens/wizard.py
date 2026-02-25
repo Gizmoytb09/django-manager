@@ -381,7 +381,7 @@ class WizardNav(Horizontal):
         height: 5;
         border-top: tall #1a1a1a;
         background: #0f0f0f;
-        align: right middle;
+        align: center middle;
         padding: 0 2;
         dock: bottom;
     }

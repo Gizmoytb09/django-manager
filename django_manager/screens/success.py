@@ -73,7 +73,7 @@ class SuccessScreen(Screen):
     #s-progress { margin: 1 0; width: 100%; }
 
     #s-dash-btn {
-        width: 100%;
+        width: 80%;
         height: 3;
         background: #092E20;
         color: #44B78B;

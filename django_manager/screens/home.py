@@ -58,13 +58,14 @@ class HomeScreen(Screen):
     }
 
     #btn-create {
-        width: 100%;
+        width: 90%;
         height: 5;
         background: #092E20;
         color: #44B78B;
         border: tall #44B78B;
         text-style: bold;
         content-align: center middle;
+        padding: 0 2;
         margin-bottom: 1;
     }
 
@@ -80,13 +81,13 @@ class HomeScreen(Screen):
     }
 
     .home-secondary {
-        width: 100%;
+        width: 90%;
         height: 3;
         background: #111111;
         color: #3a3a3a;
         border: tall #1a1a1a;
-        content-align: left middle;
-        padding-left: 2;
+        content-align: center middle;
+        padding: 0 2;
         margin-bottom: 1;
     }
 
@@ -178,8 +179,8 @@ class HomeScreen(Screen):
         match event.button.id:
             case "btn-create":   self.action_create()
             case "btn-open":     self.action_open()
-            case "btn-docs":     self.notify("Documentation — coming soon", severity="information")
-            case "btn-settings": self.notify("Settings — coming soon", severity="information")
+            case "btn-docs":     self.action_docs()
+            case "btn-settings": self.action_settings()
 
     # ── Key actions ───────────────────────────────────────────
     def action_create(self) -> None:
@@ -189,5 +190,9 @@ class HomeScreen(Screen):
     def action_open(self)     -> None:
         from .open_project import OpenProjectScreen
         self.app.push_screen(OpenProjectScreen())
-    def action_docs(self)     -> None: self.notify("Documentation — coming soon")
-    def action_settings(self) -> None: self.notify("Settings — coming soon")
+    def action_docs(self)     -> None:
+        from .docs import DocsScreen
+        self.app.push_screen(DocsScreen())
+    def action_settings(self) -> None:
+        from .settings import SettingsScreen
+        self.app.push_screen(SettingsScreen())
