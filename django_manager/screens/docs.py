@@ -49,6 +49,7 @@ the terminal.[/]
 [#56b6c2]Manager Commands[/]
 • [bold]manager docs[/] — show the built-in docs.
 • [bold]manager add <pkg>[/] — add a package via uv.
+• [bold]manager init[/] — generate a minimal pyproject.toml.
 • [bold]manager packages[/] — list installed packages.
 • [bold]manager remove <pkg>[/] — remove packages.
 • [bold]manager remove --tui[/] — interactive removal.

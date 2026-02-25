@@ -119,7 +119,7 @@ async def create_project(
 
     # 4. Install Django (needed for startproject)
     try:
-        _ensure_pyproject(cfg)
+        ensure_pyproject(cfg)
     except Exception as e:
         yield "install", StepResult(ok=False, message="Package install failed", detail=str(e))
         return
@@ -331,7 +331,7 @@ def _combined_output(result: subprocess.CompletedProcess) -> str:
     return out or err
 
 
-def _ensure_pyproject(cfg: ProjectConfig) -> None:
+def ensure_pyproject(cfg: ProjectConfig) -> None:
     pyproject = cfg.path / "pyproject.toml"
     if pyproject.exists():
         return

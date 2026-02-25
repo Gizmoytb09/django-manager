@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-django-manager = "django_manager.app:run"
+django-manager = "django_manager.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["django_manager"]

@@ -23,6 +23,7 @@ from ..core.config import APP_VERSION
 from ..core.settings import load_settings
 from ..core.operations import (
     ProjectConfig,
+    ensure_pyproject,
     read_project_dependencies,
     run_django_command,
     start_runserver,
@@ -809,6 +810,7 @@ class DashboardScreen(Screen):
                     ("manager open",     "Open an existing project"),
                     ("manager docs",     "Show this reference"),
                     ("manager add <pkg>", "Add a package via uv"),
+                    ("manager init",     "Generate a minimal pyproject.toml"),
                     ("manager packages", "List installed packages"),
                     ("manager remove",   "Remove packages (use --tui)"),
                     ("manager lock",     "Regenerate uv.lock"),
@@ -858,6 +860,24 @@ class DashboardScreen(Screen):
                     self.cfg.packages = read_project_dependencies(self.cfg.path)
                     panel.append_badges(("ADDED", "ok"))
                 else:
+                    if "pyproject.toml" in (result.stderr or ""):
+                        panel.append(
+                            "[#e5c07b]No pyproject.toml found. Run: manager init[/]",
+                            markup=True,
+                        )
+                    panel.append_badges(("ERROR", "err"))
+
+            case "init" | "pyproject":
+                if not self.cfg:
+                    panel.append("[#e06c75]No project loaded.[/]", markup=True)
+                    panel.append_badges(("ERROR", "err"))
+                    return
+                try:
+                    ensure_pyproject(self.cfg)
+                    panel.append("[#3a3a3a]Generated pyproject.toml[/]", markup=True)
+                    panel.append_badges(("PYPROJECT", "ok"))
+                except Exception as e:
+                    panel.append(f"[#e06c75]{e}[/]", markup=True)
                     panel.append_badges(("ERROR", "err"))
 
             case "packages" | "list":
