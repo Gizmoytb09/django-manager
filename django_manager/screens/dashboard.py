@@ -19,6 +19,7 @@ from textual.screen import Screen
 from textual.message import Message
 from textual.widgets import Button, Input, Label, Static
 
+from ..core.config import APP_VERSION
 from ..core.operations import ProjectConfig, run_django_command, start_runserver
 
 # ── Rich markup helpers ──────────────────────────────────────────────────────
@@ -47,17 +48,14 @@ SIDEBAR_ITEMS = [
         ("⟳", "Migrate"),
         ("+", "Makemigrations"),
         ("◎", "Shell"),
-        ("✦", "Collectstatic"),
     ]),
     ("PROJECT", [
         ("📦", "Packages"),
         ("⚙",  "Settings"),
-        ("📱", "Apps"),
     ]),
     ("MANAGER", [
         ("◉", "Docs"),
         ("+", "Add Package"),
-        ("↑", "Update Deps"),
         ("🔒", "Lock File"),
     ]),
 ]
@@ -345,19 +343,31 @@ class DashboardScreen(Screen):
         Binding("escape", "go_home",        "Home",      show=False),
     ]
 
+    active_view: reactive[str] = reactive("server")
+
     CSS = """
     DashboardScreen { background: #0a0a0a; layout: vertical; }
 
     #dash-header {
-        height: 3;
+        height: 4;
         background: #0f0f0f;
         border-bottom: tall #1a1a1a;
         padding: 0 2;
+        layout: vertical;
         align: left middle;
     }
-    #dh-project { color: #44B78B; text-style: bold; }
-    #dh-sep     { color: #1e1e1e; width: 3; content-align: center middle; }
-    #dh-path    { color: #3a3a3a; width: 1fr; }
+    #dh-banner {
+        height: 2;
+        color: #44B78B;
+        text-style: bold;
+        content-align: left middle;
+    }
+    #dh-subline {
+        height: 2;
+        color: #3a3a3a;
+        content-align: left middle;
+    }
+    #dh-subline b { color: #888888; }
     .dh-badge   { height: 3; padding: 0 1; content-align: center middle; margin: 0 1; }
     .dh-badge-blue   { background: #0d1f2d; color: #61afef; border: tall #1a3a50; }
     .dh-badge-green  { background: #0a1f14; color: #44B78B; border: tall #092E20; }
@@ -367,6 +377,30 @@ class DashboardScreen(Screen):
         height: 3; padding: 0 2; content-align: center middle; margin-right: 1;
     }
     #server-running-badge.hidden { display: none; }
+
+    #dash-view {
+        height: 3;
+        background: #0f0f0f;
+        border-bottom: tall #1a1a1a;
+        padding: 0 2;
+        align: left middle;
+    }
+    #dash-spacer { width: 1fr; }
+    .view-tab {
+        height: 3;
+        padding: 0 2;
+        margin-right: 1;
+        background: #111111;
+        color: #555555;
+        border: tall #1a1a1a;
+        content-align: center middle;
+    }
+    .view-tab--active {
+        background: #0a1f14;
+        color: #44B78B;
+        border: tall #092E20;
+        text-style: bold;
+    }
 
     #dash-body  { height: 1fr; layout: horizontal; overflow: hidden; }
     #dash-main  { width: 1fr; layout: vertical;  overflow: hidden; }
@@ -383,15 +417,27 @@ class DashboardScreen(Screen):
         project_name = self.cfg.name if self.cfg else "my_project"
         project_path = str(self.cfg.path) if self.cfg else "~/projects/my_project"
         py_ver       = self.cfg.python_ver if self.cfg else "3.12"
-        dj_ver       = self.cfg.django_ver if self.cfg else "5.0"
+        dj_ver       = _detect_django_version(self.cfg.venv_path if self.cfg else None,
+                                             self.cfg.django_ver if self.cfg else "5.0")
 
         # Header
-        with Horizontal(id="dash-header"):
-            yield Static(project_name, id="dh-project")
-            yield Static("|",          id="dh-sep")
-            yield Static(project_path, id="dh-path")
-            yield Static(f"Django {dj_ver}", classes="dh-badge dh-badge-blue")
-            yield Static(f"Python {py_ver}", classes="dh-badge dh-badge-green")
+        with Container(id="dash-header"):
+            yield Static(
+                f"[bold #44B78B]Running Django Manager v{APP_VERSION}[/]  "
+                f"[#1e1e1e]•[/]  [#888888]Django {dj_ver}[/]  [#1e1e1e]•[/]  [#888888]Python {py_ver}[/]",
+                id="dh-banner",
+                markup=True,
+            )
+            yield Static(
+                f"[#3a3a3a]Project:[/] [b]{project_name}[/]   "
+                f"[#3a3a3a]Path:[/] [b]{project_path}[/]",
+                id="dh-subline",
+                markup=True,
+            )
+        with Horizontal(id="dash-view"):
+            yield Button("Server", id="view-server", classes="view-tab view-tab--active")
+            yield Button("Command", id="view-command", classes="view-tab")
+            yield Static("", id="dash-spacer")
             yield Static("● RUNNING :8000", id="server-running-badge")
             yield Button("⌂ Home", id="btn-go-home", classes="btn-action")
 
@@ -407,6 +453,7 @@ class DashboardScreen(Screen):
         # Hide server running badge initially
         self.query_one("#server-running-badge").add_class("hidden")
         self._apply_responsive()
+        self._apply_view()
 
     def on_resize(self, event) -> None:  # type: ignore[override]
         self._apply_responsive()
@@ -417,6 +464,21 @@ class DashboardScreen(Screen):
         sidebar.styles.width = width
         server_panel = self.query_one(ServerPanel)
         server_panel.styles.height = 12 if self.size.height < 35 else 16
+
+    def _apply_view(self) -> None:
+        server = self.query_one(ServerPanel)
+        command = self.query_one(CommandPanel)
+        server.display = self.active_view == "server"
+        command.display = self.active_view == "command"
+        self._set_view_tab("view-server", self.active_view == "server")
+        self._set_view_tab("view-command", self.active_view == "command")
+
+    def _set_view_tab(self, tab_id: str, active: bool) -> None:
+        tab = self.query_one(f"#{tab_id}", Button)
+        if active:
+            tab.add_class("view-tab--active")
+        else:
+            tab.remove_class("view-tab--active")
 
     # ── Server control ────────────────────────────────────────
 
@@ -447,14 +509,10 @@ class DashboardScreen(Screen):
                 self._show_packages()
             case "Settings":
                 self._show_settings()
-            case "Apps":
-                self._run_command("django showmigrations")
             case "Docs":
                 self._run_command("manager docs")
             case "Add Package":
                 self._run_command("manager add")
-            case "Update Deps":
-                self._run_command("manager update")
             case "Lock File":
                 self._run_command("manager lock")
 
@@ -639,7 +697,6 @@ class DashboardScreen(Screen):
                     ("manager open",     "Open an existing project"),
                     ("manager docs",     "Show this reference"),
                     ("manager add",      "Add a package via uv"),
-                    ("manager update",   "Update all packages"),
                     ("manager lock",     "Regenerate uv.lock"),
                     ("manager env",      "Show virtual environment info"),
                 ]
@@ -699,8 +756,15 @@ class DashboardScreen(Screen):
     # ── Misc ──────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-go-home":
-            self.action_go_home()
+        match event.button.id:
+            case "btn-go-home":
+                self.action_go_home()
+            case "view-server":
+                self.active_view = "server"
+                self._apply_view()
+            case "view-command":
+                self.active_view = "command"
+                self._apply_view()
 
     def action_go_home(self) -> None:
         self._stop_server()
@@ -724,3 +788,22 @@ def _colorise_request(line: str) -> str:
     line = re.sub(r' (404|403|401) ', r' [bold #e06c75]\1[/] ', line)
     line = re.sub(r' (500|502|503) ', r' [bold #e06c75]\1[/] ', line)
     return line
+
+
+def _detect_django_version(venv_path: Optional[Path], fallback: str) -> str:
+    if not venv_path:
+        return fallback
+    candidates = [
+        venv_path / "Lib" / "site-packages" / "django" / "__init__.py",
+    ]
+    candidates.extend(venv_path.glob("lib/python*/site-packages/django/__init__.py"))
+    for path in candidates:
+        try:
+            if path.exists():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                match = re.search(r"__version__\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", text)
+                if match:
+                    return match.group(1)
+        except Exception:
+            continue
+    return fallback
