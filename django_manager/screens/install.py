@@ -168,7 +168,16 @@ class InstallScreen(Screen):
             )
 
     def on_mount(self) -> None:
+        self._apply_responsive()
         self.run_worker(self._run_install(), exclusive=True)
+
+    def on_resize(self, event) -> None:  # type: ignore[override]
+        self._apply_responsive()
+
+    def _apply_responsive(self) -> None:
+        wrap = self.query_one("#install-wrap")
+        width = max(50, min(self.size.width - 4, 80))
+        wrap.styles.width = width
 
     # ── Worker ────────────────────────────────────────────────
 

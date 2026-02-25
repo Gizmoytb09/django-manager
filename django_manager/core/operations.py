@@ -10,6 +10,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -32,6 +33,7 @@ class ProjectConfig:
     django_ver:   str
     starter_pack: str
     packages:     list[str] = field(default_factory=list)
+    venv_dir:     Optional[Path] = None
 
     @property
     def path(self) -> Path:
@@ -39,7 +41,7 @@ class ProjectConfig:
 
     @property
     def venv_path(self) -> Path:
-        return self.path / ".venv"
+        return self.venv_dir if self.venv_dir else (self.path / ".venv")
 
     @property
     def activate_script(self) -> Path:
@@ -181,18 +183,23 @@ async def run_django_command(
     command: str,
     args: list[str],
     python_ver: str,
+    venv_path: Optional[Path] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream output lines from: python manage.py <command> [args]
     """
-    venv_python = _python_bin(project_path)
+    venv_python = _python_bin(project_path, venv_path)
     manage_py   = project_path / "manage.py"
+    if not manage_py.exists():
+        raise FileNotFoundError(f"manage.py not found at {manage_py}")
 
+    env = venv_env_from_path(venv_path) if venv_path else None
     proc = await asyncio.create_subprocess_exec(
         str(venv_python), str(manage_py), command, *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=project_path,
+        env=env,
     )
 
     async for line in proc.stdout:
@@ -204,19 +211,24 @@ async def run_django_command(
 async def start_runserver(
     project_path: Path,
     port: int = 8000,
+    venv_path: Optional[Path] = None,
 ) -> asyncio.subprocess.Process:
     """
     Start `python manage.py runserver` as a long-running process.
     Caller is responsible for streaming proc.stdout and calling proc.terminate().
     """
-    venv_python = _python_bin(project_path)
+    venv_python = _python_bin(project_path, venv_path)
     manage_py   = project_path / "manage.py"
+    if not manage_py.exists():
+        raise FileNotFoundError(f"manage.py not found at {manage_py}")
 
+    env = venv_env_from_path(venv_path) if venv_path else None
     proc = await asyncio.create_subprocess_exec(
         str(venv_python), str(manage_py), "runserver", f"0.0.0.0:{port}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=project_path,
+        env=env,
     )
     return proc
 
@@ -272,16 +284,24 @@ def _ensure_pyproject(cfg: ProjectConfig) -> None:
 
 def _venv_env(cfg: ProjectConfig) -> dict:
     """Build an env dict that points PATH at the venv binaries."""
+    return venv_env_from_path(cfg.venv_path)
+
+
+def venv_env_from_path(venv_path: Path) -> dict:
     env = os.environ.copy()
-    bin_dir = cfg.venv_path / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir = venv_path / ("Scripts" if os.name == "nt" else "bin")
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
-    env["VIRTUAL_ENV"] = str(cfg.venv_path)
+    env["VIRTUAL_ENV"] = str(venv_path)
     env.pop("PYTHONHOME", None)
     return env
 
 
-def _python_bin(project_path: Path) -> Path:
-    venv = project_path / ".venv"
+def _python_bin(project_path: Path, venv_path: Optional[Path] = None) -> Path:
+    venv = venv_path if venv_path else (project_path / ".venv")
     if os.name == "nt":
-        return venv / "Scripts" / "python.exe"
-    return venv / "bin" / "python"
+        candidate = venv / "Scripts" / "python.exe"
+    else:
+        candidate = venv / "bin" / "python"
+    if candidate.exists():
+        return candidate
+    return Path(sys.executable)

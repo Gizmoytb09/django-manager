@@ -465,7 +465,16 @@ class WizardScreen(Screen):
             yield WizardNav(step=1, total=4)
 
     def on_mount(self) -> None:
+        self._apply_responsive()
         self._show_step(0)
+
+    def on_resize(self, event) -> None:  # type: ignore[override]
+        self._apply_responsive()
+
+    def _apply_responsive(self) -> None:
+        sidebar = self.query_one("#wizard-sidebar")
+        width = 18 if self.size.width < 90 else 24
+        sidebar.styles.width = width
 
     # ── Step navigation ───────────────────────────────────────
 

@@ -94,6 +94,11 @@ class Sidebar(Vertical):
 
     active_item: reactive[str] = reactive("Runserver")
 
+    class Selected(Message):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
     def compose(self) -> ComposeResult:
         for section, items in SIDEBAR_ITEMS:
             yield Static(section, classes="sb-section")
@@ -111,6 +116,7 @@ class Sidebar(Vertical):
                 el = self.query_one(f"#{item_id}", Static)
                 if event.widget is el:
                     self.active_item = name
+                    self.post_message(self.Selected(name))
                     break
 
     def watch_active_item(self, val: str) -> None:
@@ -371,6 +377,7 @@ class DashboardScreen(Screen):
         self.cfg          = cfg
         self._server_proc: Optional[asyncio.subprocess.Process] = None
         self._server_task: Optional[asyncio.Task]               = None
+        self._warned_no_venv = False
 
     def compose(self) -> ComposeResult:
         project_name = self.cfg.name if self.cfg else "my_project"
@@ -399,6 +406,17 @@ class DashboardScreen(Screen):
     def on_mount(self) -> None:
         # Hide server running badge initially
         self.query_one("#server-running-badge").add_class("hidden")
+        self._apply_responsive()
+
+    def on_resize(self, event) -> None:  # type: ignore[override]
+        self._apply_responsive()
+
+    def _apply_responsive(self) -> None:
+        sidebar = self.query_one(Sidebar)
+        width = 18 if self.size.width < 100 else 22
+        sidebar.styles.width = width
+        server_panel = self.query_one(ServerPanel)
+        server_panel.styles.height = 12 if self.size.height < 35 else 16
 
     # ── Server control ────────────────────────────────────────
 
@@ -412,10 +430,89 @@ class DashboardScreen(Screen):
         self._stop_server()
         self.run_worker(self._start_server(), exclusive=False)
 
+    def on_sidebar_selected(self, event: Sidebar.Selected) -> None:
+        name = event.name
+        match name:
+            case "Runserver":
+                self._run_command("django runserver")
+            case "Migrate":
+                self._run_command("django migrate")
+            case "Makemigrations":
+                self._run_command("django makemigrations")
+            case "Shell":
+                self._show_shell_hint()
+            case "Collectstatic":
+                self._run_command("django collectstatic --noinput")
+            case "Packages":
+                self._show_packages()
+            case "Settings":
+                self._show_settings()
+            case "Apps":
+                self._run_command("django showmigrations")
+            case "Docs":
+                self._run_command("manager docs")
+            case "Add Package":
+                self._run_command("manager add")
+            case "Update Deps":
+                self._run_command("manager update")
+            case "Lock File":
+                self._run_command("manager lock")
+
+    def _run_command(self, raw: str) -> None:
+        self.run_worker(self._handle_command(raw), exclusive=False)
+
+    def _show_shell_hint(self) -> None:
+        panel = self.query_one(CommandPanel)
+        panel.append(
+            "[#e5c07b]Django shell is interactive. Run it in a terminal:[/]",
+            markup=True,
+        )
+        if self.cfg:
+            panel.append(f"  [#555555]{self.cfg.venv_path}\\Scripts\\python manage.py shell[/]", markup=True)
+        panel.append_badges(("SHELL", "warn"))
+
+    def _show_packages(self) -> None:
+        panel = self.query_one(CommandPanel)
+        panel.append("[#56b6c2]── INSTALLED PACKAGES ─────────────────────────────[/]", markup=True)
+        if self.cfg and self.cfg.packages:
+            for pkg in self.cfg.packages:
+                panel.append(f"  [#555555]{pkg}[/]", markup=True)
+        else:
+            panel.append("  [#555555]No package metadata available.[/]", markup=True)
+        panel.append("[#1e1e1e]──────────────────────────────────────────────────[/]", markup=True)
+        panel.append_badges(("PACKAGES", "info"))
+
+    def _show_settings(self) -> None:
+        panel = self.query_one(CommandPanel)
+        module, path = self._resolve_settings_module()
+        if module:
+            panel.append(f"[#56b6c2]Settings module:[/] [#44B78B]{module}[/]", markup=True)
+            if path:
+                panel.append(f"[#3a3a3a]Path:[/] [#555555]{path}[/]", markup=True)
+        else:
+            panel.append("[#e5c07b]Settings module not found (check manage.py).[/]", markup=True)
+        panel.append_badges(("SETTINGS", "info"))
+
+    def _resolve_settings_module(self) -> tuple[Optional[str], Optional[str]]:
+        if not self.cfg:
+            return None, None
+        manage = self.cfg.path / "manage.py"
+        if not manage.exists():
+            return None, None
+        text = manage.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"DJANGO_SETTINGS_MODULE['\"]\\s*,\\s*['\"]([^'\"]+)", text)
+        if not match:
+            return None, None
+        module = match.group(1)
+        path = self.cfg.path / Path(*module.split(".")).with_suffix(".py")
+        return module, str(path) if path.exists() else None
+
     async def _start_server(self) -> None:
         if not self.cfg:
             self.query_one(CommandPanel).append("[#e06c75]No project loaded.[/]", markup=True)
             return
+
+        self._warn_if_no_venv(self.query_one(CommandPanel))
 
         srv_panel = self.query_one(ServerPanel)
         srv_panel.set_running(True)
@@ -428,7 +525,7 @@ class DashboardScreen(Screen):
         )
 
         try:
-            self._server_proc = await start_runserver(self.cfg.path)
+            self._server_proc = await start_runserver(self.cfg.path, venv_path=self.cfg.venv_path)
         except Exception as e:
             srv_panel.append_line(_ts(), "ERROR", str(e))
             srv_panel.set_running(False)
@@ -486,19 +583,25 @@ class DashboardScreen(Screen):
             args = parts[2:] if len(parts) > 2 else []
 
             if cmd == "runserver":
+                self._warn_if_no_venv(panel)
                 panel.append_badges(("RUNSERVER", "info"))
                 self.on_server_panel_start_server()
+                return
+            if cmd == "shell":
+                self._show_shell_hint()
                 return
 
             if not self.cfg:
                 panel.append("[#e06c75]No project loaded.[/]", markup=True)
                 return
 
+            self._warn_if_no_venv(panel)
+
             panel.append(f"[#3a3a3a]Running: python manage.py {cmd}...[/]", markup=True)
             output_lines = []
             try:
                 async for line in run_django_command(
-                    self.cfg.path, cmd, args, self.cfg.python_ver
+                    self.cfg.path, cmd, args, self.cfg.python_ver, venv_path=self.cfg.venv_path
                 ):
                     panel.append(f"  [#555555]{line}[/]", markup=True)
                     output_lines.append(line)
@@ -511,8 +614,9 @@ class DashboardScreen(Screen):
                 else:
                     panel.append_badges(("OK", "ok"), ("NO OUTPUT", "neutral"))
 
-            except FileNotFoundError:
-                panel.append_badges(("ERROR", "err"), ("manage.py not found", "neutral"))
+            except FileNotFoundError as e:
+                panel.append(f"[#e06c75]{e}[/]", markup=True)
+                panel.append_badges(("ERROR", "err"), ("command failed", "neutral"))
 
         # ── manager <command> ─────────────────────────────────
         elif parts[0] == "manager":
@@ -563,13 +667,34 @@ class DashboardScreen(Screen):
                 panel.append("[#3a3a3a]Example: manager add djangorestframework[/]", markup=True)
                 panel.append_badges(("HINT", "warn"))
 
+            case "update":
+                panel.append("[#3a3a3a]Update deps is not wired yet.[/]", markup=True)
+                panel.append("[#3a3a3a]Tip: run [bold]uv lock --upgrade[/] in the project folder.[/]", markup=True)
+                panel.append_badges(("UPDATE", "warn"))
+
             case "lock":
                 panel.append("[#3a3a3a]Regenerating uv.lock...[/]", markup=True)
                 panel.append_badges(("DONE", "ok"), ("uv.lock", "neutral"))
 
+            case "open":
+                panel.append("[#3a3a3a]Use the Home screen to open another project.[/]", markup=True)
+                panel.append_badges(("OPEN", "info"))
+
             case _:
                 panel.append(f"[#e06c75]Unknown manager command: {cmd}[/]", markup=True)
                 panel.append_badges(("ERROR", "err"))
+
+    def _warn_if_no_venv(self, panel: CommandPanel) -> None:
+        if not self.cfg or self._warned_no_venv:
+            return
+        if not self.cfg.venv_path.exists():
+            panel.append(
+                "[#e5c07b]No .venv found for this project; using current Python. "
+                "Commands may fail if dependencies aren't installed.[/]",
+                markup=True,
+            )
+            panel.append_badges(("VENV", "warn"))
+            self._warned_no_venv = True
 
     # ── Misc ──────────────────────────────────────────────────
 

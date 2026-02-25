@@ -133,6 +133,22 @@ class HomeScreen(Screen):
         Binding("q", "app.quit", "Quit",           show=False),
     ]
 
+    def on_mount(self) -> None:
+        self._apply_responsive()
+
+    def on_resize(self, event) -> None:  # type: ignore[override]
+        self._apply_responsive()
+
+    def _apply_responsive(self) -> None:
+        wrap = self.query_one("#home-wrap")
+        width = max(40, min(self.size.width - 4, 60))
+        wrap.styles.width = width
+        compact = self.size.height < 28
+        self.query_one("#logo").styles.height = 6 if compact else 8
+        self.query_one("#btn-create").styles.height = 4 if compact else 5
+        for btn in self.query(".home-secondary"):
+            btn.styles.height = 2 if compact else 3
+
     def compose(self) -> ComposeResult:
         with Container(id="home-wrap"):
             yield Static(LOGO,     id="logo",    markup=True)
@@ -161,7 +177,7 @@ class HomeScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         match event.button.id:
             case "btn-create":   self.action_create()
-            case "btn-open":     self.notify("Open Project — coming soon", severity="information")
+            case "btn-open":     self.action_open()
             case "btn-docs":     self.notify("Documentation — coming soon", severity="information")
             case "btn-settings": self.notify("Settings — coming soon", severity="information")
 
@@ -170,6 +186,8 @@ class HomeScreen(Screen):
         from .wizard import WizardScreen
         self.app.push_screen(WizardScreen())
 
-    def action_open(self)     -> None: self.notify("Open Project — coming soon")
+    def action_open(self)     -> None:
+        from .open_project import OpenProjectScreen
+        self.app.push_screen(OpenProjectScreen())
     def action_docs(self)     -> None: self.notify("Documentation — coming soon")
     def action_settings(self) -> None: self.notify("Settings — coming soon")

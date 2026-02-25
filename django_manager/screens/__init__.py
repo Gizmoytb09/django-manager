@@ -3,6 +3,7 @@ from django_manager.screens.wizard import WizardScreen
 from django_manager.screens.install import InstallScreen
 from django_manager.screens.success import SuccessScreen
 from django_manager.screens.dashboard import DashboardScreen
+from django_manager.screens.open_project import OpenProjectScreen
 
 __all__ = [
     "HomeScreen",
@@ -10,4 +11,5 @@ __all__ = [
     "InstallScreen",
     "SuccessScreen",
     "DashboardScreen",
+    "OpenProjectScreen",
 ]
