@@ -1,0 +1,24 @@
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name        = "django-manager"
+version     = "0.1.0"
+description = "The modern Django control centre — TUI powered by uv, Textual, and Rich"
+readme      = "README.md"
+requires-python = ">=3.10"
+license     = { text = "MIT" }
+keywords    = ["django", "cli", "tui", "uv", "textual"]
+
+dependencies = [
+    "textual>=0.47.0",
+    "rich>=13.0.0",
+    "click>=8.1.0",
+]
+
+[project.scripts]
+django-manager = "django_manager.app:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["django_manager"]
