@@ -405,7 +405,10 @@ class OptionsStep(Vertical):
 
     def watch_interactive(self, val: str) -> None:
         for key in ("htmx", "ajax", "jquery"):
-            row = self.query_one(f"#opt-interactive-{key}", Static)
+            try:
+                row = self.query_one(f"#opt-interactive-{key}", Static)
+            except Exception:
+                return
             if key == val:
                 row.add_class("opt-row--selected")
             else:
@@ -414,7 +417,10 @@ class OptionsStep(Vertical):
 
     def watch_css_framework(self, val: str) -> None:
         for key in ("bootstrap", "tailwind", "none"):
-            row = self.query_one(f"#opt-css-{key}", Static)
+            try:
+                row = self.query_one(f"#opt-css-{key}", Static)
+            except Exception:
+                return
             if key == val:
                 row.add_class("opt-row--selected")
             else:
@@ -423,7 +429,10 @@ class OptionsStep(Vertical):
 
     def watch_auth_framework(self, val: str) -> None:
         for key in ("django", "allauth"):
-            row = self.query_one(f"#opt-auth-{key}", Static)
+            try:
+                row = self.query_one(f"#opt-auth-{key}", Static)
+            except Exception:
+                return
             if key == val:
                 row.add_class("opt-row--selected")
             else:
@@ -431,7 +440,10 @@ class OptionsStep(Vertical):
         self._update_summary()
 
     def watch_add_pytest(self, val: bool) -> None:
-        row = self.query_one("#opt-extra-pytest", Static)
+        try:
+            row = self.query_one("#opt-extra-pytest", Static)
+        except Exception:
+            return
         if val:
             row.add_class("opt-row--selected")
         else:
@@ -439,7 +451,10 @@ class OptionsStep(Vertical):
         self._update_summary()
 
     def watch_skip_auth_app(self, val: bool) -> None:
-        row = self.query_one("#opt-skip-auth", Static)
+        try:
+            row = self.query_one("#opt-skip-auth", Static)
+        except Exception:
+            return
         if val:
             row.add_class("opt-row--selected")
         else:
@@ -523,7 +538,10 @@ class AuthSetupStep(Vertical):
                 self.run_migrations = not self.run_migrations
 
     def watch_custom_user(self, val: bool) -> None:
-        row = self.query_one("#au-custom-user", Static)
+        try:
+            row = self.query_one("#au-custom-user", Static)
+        except Exception:
+            return
         if val:
             row.add_class("au-row--selected")
         else:
@@ -532,7 +550,10 @@ class AuthSetupStep(Vertical):
             self.run_migrations = True
 
     def watch_run_migrations(self, val: bool) -> None:
-        row = self.query_one("#au-migrations", Static)
+        try:
+            row = self.query_one("#au-migrations", Static)
+        except Exception:
+            return
         if val:
             row.add_class("au-row--selected")
         else:
