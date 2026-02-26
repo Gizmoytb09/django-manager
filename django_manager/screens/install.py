@@ -15,7 +15,7 @@ from textual.widgets import Button, Label, ProgressBar, Static
 from ..core.config import APP_VERSION
 from ..core.operations import ProjectConfig, create_project, StepResult
 
-STEP_IDS = ["mkdir", "venv", "activate", "install", "startproject", "lockfile"]
+STEP_IDS = ["mkdir", "venv", "activate", "install", "startproject", "lockfile", "assets", "auth", "migrate"]
 STEP_LABELS = {
     "mkdir":       ("📁", "Creating project directory"),
     "venv":        ("🐍", "Setting up Python environment"),
@@ -23,6 +23,9 @@ STEP_LABELS = {
     "install":     ("📦", "Installing packages via uv"),
     "startproject":("🔨", "Running django-admin startproject"),
     "lockfile":    ("📄", "Generating pyproject.toml + uv.lock"),
+    "assets":      ("🧩", "Creating static/media + base template"),
+    "auth":        ("🔐", "Creating authentication app + templates"),
+    "migrate":     ("🗄️", "Running database migrations"),
 }
 
 

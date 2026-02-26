@@ -1,6 +1,6 @@
 """
 Django Manager — Create Project Wizard
-Steps: 1 Name → 2 Python → 3 Django → 4 Starter Pack → Install
+Steps: 1 Name → 2 Python → 3 Django → 4 Options → 5 Auth & Migrations → Install
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from ..core.config import (
-    APP_VERSION, DJANGO_VERSIONS, PYTHON_VERSIONS, STARTER_PACKS,
+    APP_VERSION, DJANGO_VERSIONS, PYTHON_VERSIONS,
 )
 from ..core.operations import ProjectConfig
 
@@ -27,7 +27,8 @@ STEPS = [
     "Project Name",
     "Python Version",
     "Django Version",
-    "Starter Pack",
+    "Project Options",
+    "Auth & Migrations",
 ]
 
 
@@ -274,103 +275,268 @@ class DjangoStep(Vertical):
         self.query_one("#dj-compat", Static).update(Text.from_markup(text))
 
 
-class StarterPackStep(Vertical):
+class OptionsStep(Vertical):
     DEFAULT_CSS = """
-    StarterPackStep { padding: 2 3; height: auto; }
-    #sp-title { color: #44B78B; text-style: bold; margin-bottom: 1; }
-    #sp-sub   { color: #555555; margin-bottom: 2; }
+    OptionsStep { padding: 2 3; height: auto; }
+    #op-title { color: #44B78B; text-style: bold; margin-bottom: 1; }
+    #op-sub   { color: #555555; margin-bottom: 2; }
+    .opt-head { color: #555555; margin: 1 0 1 0; }
 
-    .pack-row {
+    .opt-row {
         height: auto;
         padding: 1 2;
         background: #111111;
         border: tall #1a1a1a;
         margin-bottom: 1;
     }
-    .pack-row--selected {
+    .opt-row--selected {
         background: #0a1f14;
         border: tall #44B78B;
     }
-    .pack-row--disabled {
-        background: #0a0a0a;
-        border: tall #111111;
-        opacity: 0.4;
-    }
-    .pack-name { color: #888888; text-style: bold; }
-    .pack-name--selected { color: #44B78B; }
-    .pack-desc  { color: #3a3a3a; margin-top: 1; }
-    .pack-tags  { color: #1e6e42; margin-top: 1; }
-    .pack-soon  { color: #1e1e1e; }
+    .opt-name { color: #888888; text-style: bold; }
+    .opt-name--selected { color: #44B78B; }
+    .opt-desc  { color: #3a3a3a; margin-top: 1; }
 
-    #sp-summary {
+    #op-summary {
         background: #0f0f0f; border: tall #1a1a1a;
         padding: 1 2; height: auto; margin-top: 1;
     }
     """
 
-    selected_pack: reactive[Optional[str]] = reactive("htmx")
+    interactive: reactive[str] = reactive("htmx")
+    css_framework: reactive[str] = reactive("bootstrap")
+    auth_framework: reactive[str] = reactive("django")
+    add_pytest: reactive[bool] = reactive(False)
+    skip_auth_app: reactive[bool] = reactive(False)
 
     def compose(self) -> ComposeResult:
-        yield Static("Starter Packs", id="sp-title")
-        yield Static("Select a pack to bootstrap your project with curated packages.", id="sp-sub")
+        yield Static("Project Options", id="op-title")
+        yield Static("Pick your stack preferences and extras.", id="op-sub")
 
-        for pack in STARTER_PACKS:
-            sel    = " pack-row--selected" if pack["id"] == "htmx" else ""
-            dis    = " pack-row--disabled" if not pack["available"] else ""
-            name_c = "pack-name--selected" if pack["id"] == "htmx" else "pack-name"
-            tags   = "  ".join(pack["tags"])
-            soon   = "" if pack["available"] else "  [COMING V2]"
-
+        yield Static("Interactive", classes="opt-head")
+        for key, label, desc in [
+            ("htmx", "HTMX", "Install django-htmx and enable its middleware."),
+            ("ajax", "Ajax", "Use standard Django views + fetch/XHR patterns."),
+            ("jquery", "jQuery", "Include a jQuery-friendly layout baseline."),
+        ]:
+            sel = " opt-row--selected" if self.interactive == key else ""
+            name_cls = "opt-name--selected" if self.interactive == key else "opt-name"
             yield Static(
-                f"[{name_c}]{pack['icon']} {pack['name']}[/{name_c}]{soon}\n"
-                f"[pack-desc]{pack['desc']}[/pack-desc]\n"
-                f"[#1e6e42]{tags}[/]",
-                id=f"pack-{pack['id']}",
-                classes=f"pack-row{sel}{dis}",
+                f"[{name_cls}]⚡ {label}[/{name_cls}]\n[opt-desc]{desc}[/opt-desc]",
+                id=f"opt-interactive-{key}",
+                classes=f"opt-row{sel}",
                 markup=True,
             )
 
-        yield Static("", id="sp-summary", markup=True)
+        yield Static("CSS Framework", classes="opt-head")
+        for key, label, desc in [
+            ("bootstrap", "Bootstrap", "Bootstrap-ready template layout."),
+            ("tailwind", "Tailwind", "Tailwind-ready template layout."),
+            ("none", "None (Django default)", "Keep Django's default homepage."),
+        ]:
+            sel = " opt-row--selected" if self.css_framework == key else ""
+            name_cls = "opt-name--selected" if self.css_framework == key else "opt-name"
+            yield Static(
+                f"[{name_cls}]🎨 {label}[/{name_cls}]\n[opt-desc]{desc}[/opt-desc]",
+                id=f"opt-css-{key}",
+                classes=f"opt-row{sel}",
+                markup=True,
+            )
+
+        yield Static("Authentication Framework", classes="opt-head")
+        for key, label, desc in [
+            ("django", "None (Django default)", "Use Django auth + generated templates."),
+            ("allauth", "django-allauth", "Install allauth and generate overrides."),
+        ]:
+            sel = " opt-row--selected" if self.auth_framework == key else ""
+            name_cls = "opt-name--selected" if self.auth_framework == key else "opt-name"
+            yield Static(
+                f"[{name_cls}]🔐 {label}[/{name_cls}]\n[opt-desc]{desc}[/opt-desc]",
+                id=f"opt-auth-{key}",
+                classes=f"opt-row{sel}",
+                markup=True,
+            )
+
+        yield Static("Auth App", classes="opt-head")
+        skip_sel = " opt-row--selected" if self.skip_auth_app else ""
+        skip_name = "opt-name--selected" if self.skip_auth_app else "opt-name"
+        yield Static(
+            f"[{skip_name}]🚫 Skip authentication app[/{skip_name}]\n"
+            f"[opt-desc]Create a project without the auth app scaffold.[/opt-desc]",
+            id="opt-skip-auth",
+            classes=f"opt-row{skip_sel}",
+            markup=True,
+        )
+
+        yield Static("Additional", classes="opt-head")
+        add_sel = " opt-row--selected" if self.add_pytest else ""
+        add_name = "opt-name--selected" if self.add_pytest else "opt-name"
+        yield Static(
+            f"[{add_name}]✅ pytest-django[/{add_name}]\n[opt-desc]Add pytest-django for testing.[/opt-desc]",
+            id="opt-extra-pytest",
+            classes=f"opt-row{add_sel}",
+            markup=True,
+        )
+
+        yield Static("", id="op-summary", markup=True)
 
     def on_mount(self) -> None:
         self._update_summary()
 
     def on_click(self, event) -> None:
-        for pack in STARTER_PACKS:
-            if not pack["available"]:
-                continue
-            row = self.query_one(f"#pack-{pack['id']}", Static)
-            if event.widget is row:
-                if self.selected_pack == pack["id"]:
-                    self.selected_pack = None
-                else:
-                    self.selected_pack = pack["id"]
+        widget = event.widget
+        for key in ("htmx", "ajax", "jquery"):
+            if widget is self.query_one(f"#opt-interactive-{key}", Static):
+                self.interactive = key
                 break
+        for key in ("bootstrap", "tailwind", "none"):
+            if widget is self.query_one(f"#opt-css-{key}", Static):
+                self.css_framework = key
+                break
+        for key in ("django", "allauth"):
+            if widget is self.query_one(f"#opt-auth-{key}", Static):
+                self.skip_auth_app = False
+                self.auth_framework = key
+                break
+        if widget is self.query_one("#opt-skip-auth", Static):
+            self.skip_auth_app = not self.skip_auth_app
+        if widget is self.query_one("#opt-extra-pytest", Static):
+            self.add_pytest = not self.add_pytest
 
-    def watch_selected_pack(self, val: Optional[str]) -> None:
-        for pack in STARTER_PACKS:
-            if not pack["available"]:
-                continue
-            row = self.query_one(f"#pack-{pack['id']}", Static)
-            if pack["id"] == val:
-                row.add_class("pack-row--selected")
-                row.remove_class("pack-row")
+    def watch_interactive(self, val: str) -> None:
+        for key in ("htmx", "ajax", "jquery"):
+            row = self.query_one(f"#opt-interactive-{key}", Static)
+            if key == val:
+                row.add_class("opt-row--selected")
             else:
-                row.remove_class("pack-row--selected")
+                row.remove_class("opt-row--selected")
         self._update_summary()
 
-    def _update_summary(self) -> None:
-        pack = next((p for p in STARTER_PACKS if p["id"] == self.selected_pack), None)
-        if pack:
-            pkgs = ", ".join(pack["packages"])
-            text = (
-                f"[#3a3a3a]SUMMARY[/]\n"
-                f"Pack: [#44B78B]{pack['name']}[/]\n"
-                f"Packages: [#888888]{pkgs}[/]"
-            )
+    def watch_css_framework(self, val: str) -> None:
+        for key in ("bootstrap", "tailwind", "none"):
+            row = self.query_one(f"#opt-css-{key}", Static)
+            if key == val:
+                row.add_class("opt-row--selected")
+            else:
+                row.remove_class("opt-row--selected")
+        self._update_summary()
+
+    def watch_auth_framework(self, val: str) -> None:
+        for key in ("django", "allauth"):
+            row = self.query_one(f"#opt-auth-{key}", Static)
+            if key == val:
+                row.add_class("opt-row--selected")
+            else:
+                row.remove_class("opt-row--selected")
+        self._update_summary()
+
+    def watch_add_pytest(self, val: bool) -> None:
+        row = self.query_one("#opt-extra-pytest", Static)
+        if val:
+            row.add_class("opt-row--selected")
         else:
-            text = "[#3a3a3a]No starter pack selected — only Django will be installed.[/]"
-        self.query_one("#sp-summary", Static).update(Text.from_markup(text))
+            row.remove_class("opt-row--selected")
+        self._update_summary()
+
+    def watch_skip_auth_app(self, val: bool) -> None:
+        row = self.query_one("#opt-skip-auth", Static)
+        if val:
+            row.add_class("opt-row--selected")
+        else:
+            row.remove_class("opt-row--selected")
+        self._update_summary()
+        if val:
+            self.auth_framework = "django"
+
+    def _update_summary(self) -> None:
+        extras = "pytest-django" if self.add_pytest else "none"
+        auth_app = "skipped" if self.skip_auth_app else "enabled"
+        text = (
+            f"[#3a3a3a]SUMMARY[/]\n"
+            f"Interactive: [#44B78B]{self.interactive}[/]\n"
+            f"CSS: [#44B78B]{self.css_framework}[/]\n"
+            f"Auth: [#44B78B]{self.auth_framework}[/]\n"
+            f"Auth App: [#888888]{auth_app}[/]\n"
+            f"Extras: [#888888]{extras}[/]"
+        )
+        self.query_one("#op-summary", Static).update(Text.from_markup(text))
+
+
+class AuthSetupStep(Vertical):
+    DEFAULT_CSS = """
+    AuthSetupStep { padding: 2 3; height: auto; }
+    #au-title { color: #44B78B; text-style: bold; margin-bottom: 1; }
+    #au-sub   { color: #555555; margin-bottom: 2; }
+    .au-row {
+        height: auto;
+        padding: 1 2;
+        background: #111111;
+        border: tall #1a1a1a;
+        margin-bottom: 1;
+    }
+    .au-row--selected {
+        background: #0a1f14;
+        border: tall #44B78B;
+    }
+    .au-name { color: #888888; text-style: bold; }
+    .au-name--selected { color: #44B78B; }
+    .au-desc  { color: #3a3a3a; margin-top: 1; }
+    """
+
+    custom_user: reactive[bool] = reactive(False)
+    run_migrations: reactive[bool] = reactive(True)
+
+    def compose(self) -> ComposeResult:
+        yield Static("Auth & Migrations", id="au-title")
+        yield Static(
+            "Create a custom user model and apply migrations after setup.",
+            id="au-sub",
+        )
+
+        cu_sel = " au-row--selected" if self.custom_user else ""
+        cu_name = "au-name--selected" if self.custom_user else "au-name"
+        yield Static(
+            f"[{cu_name}]👤 Custom User Model[/{cu_name}]\n"
+            f"[au-desc]Create AbstractUser in authentication app and wire settings.[/au-desc]",
+            id="au-custom-user",
+            classes=f"au-row{cu_sel}",
+            markup=True,
+        )
+
+        mig_sel = " au-row--selected" if self.run_migrations else ""
+        mig_name = "au-name--selected" if self.run_migrations else "au-name"
+        yield Static(
+            f"[{mig_name}]🗄️ Run Migrations[/{mig_name}]\n"
+            f"[au-desc]Apply Django + package migrations after setup.[/au-desc]",
+            id="au-migrations",
+            classes=f"au-row{mig_sel}",
+            markup=True,
+        )
+
+    def on_click(self, event) -> None:
+        if event.widget is self.query_one("#au-custom-user", Static):
+            self.custom_user = not self.custom_user
+            if self.custom_user:
+                self.run_migrations = True
+        elif event.widget is self.query_one("#au-migrations", Static):
+            if not self.custom_user:
+                self.run_migrations = not self.run_migrations
+
+    def watch_custom_user(self, val: bool) -> None:
+        row = self.query_one("#au-custom-user", Static)
+        if val:
+            row.add_class("au-row--selected")
+        else:
+            row.remove_class("au-row--selected")
+        if val:
+            self.run_migrations = True
+
+    def watch_run_migrations(self, val: bool) -> None:
+        row = self.query_one("#au-migrations", Static)
+        if val:
+            row.add_class("au-row--selected")
+        else:
+            row.remove_class("au-row--selected")
 
 
 # ── Wizard nav footer ──────────────────────────────────────────────────────
@@ -461,8 +627,9 @@ class WizardScreen(Screen):
                 yield NameStep(id="step-0")
                 yield PythonStep(id="step-1")
                 yield DjangoStep(id="step-2")
-                yield StarterPackStep(id="step-3")
-            yield WizardNav(step=1, total=4)
+                yield OptionsStep(id="step-3")
+                yield AuthSetupStep(id="step-4")
+            yield WizardNav(step=1, total=len(STEPS))
 
     def on_mount(self) -> None:
         self._apply_responsive()
@@ -479,13 +646,13 @@ class WizardScreen(Screen):
     # ── Step navigation ───────────────────────────────────────
 
     def _show_step(self, idx: int) -> None:
-        for i in range(4):
+        for i in range(len(STEPS)):
             step = self.query_one(f"#step-{i}")
             step.display = (i == idx)
 
         nav = self.query_one(WizardNav)
         nav.remove()
-        self.query_one("#wizard-main").mount(WizardNav(step=idx + 1, total=4))
+        self.query_one("#wizard-main").mount(WizardNav(step=idx + 1, total=len(STEPS)))
 
         sidebar = self.query_one(StepSidebar)
         sidebar.current = idx
@@ -496,7 +663,7 @@ class WizardScreen(Screen):
             case "wiz-back": self._retreat()
 
     def _advance(self) -> None:
-        if self.current_step < 3:
+        if self.current_step < len(STEPS) - 1:
             self.current_step += 1
             self._show_step(self.current_step)
         else:
@@ -519,19 +686,31 @@ class WizardScreen(Screen):
         loc_input  = self.query_one("#project-location", Input).value.strip() or "~/projects/"
         python_ver = self.query_one(PythonStep).selected
         django_ver = self.query_one(DjangoStep).selected
-        pack_id    = self.query_one(StarterPackStep).selected_pack
+        opts = self.query_one(OptionsStep)
+        auth_step = self.query_one(AuthSetupStep)
 
-        from ..core.config import STARTER_PACKS
-        pack = next((p for p in STARTER_PACKS if p["id"] == pack_id), None)
-        packages = pack["packages"] if pack else ["django"]
+        packages = ["django"]
+        if opts.interactive == "htmx":
+            packages.append("django-htmx")
+        if opts.auth_framework == "allauth":
+            packages.append("django-allauth")
+        if opts.add_pytest:
+            packages.append("pytest-django")
 
         cfg = ProjectConfig(
             name         = name_input,
             location     = Path(loc_input).expanduser(),
             python_ver   = python_ver,
             django_ver   = django_ver,
-            starter_pack = pack_id or "none",
+            starter_pack = "options",
             packages     = packages,
+            interactive  = opts.interactive,
+            css_framework= opts.css_framework,
+            auth_framework= opts.auth_framework,
+            add_pytest   = opts.add_pytest,
+            skip_auth_app= opts.skip_auth_app,
+            custom_user  = auth_step.custom_user,
+            run_migrations = auth_step.run_migrations,
         )
 
         from .install import InstallScreen

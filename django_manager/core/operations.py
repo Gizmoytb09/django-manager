@@ -41,6 +41,13 @@ class ProjectConfig:
     starter_pack: str
     packages:     list[str] = field(default_factory=list)
     venv_dir:     Optional[Path] = None
+    interactive:  str = "htmx"
+    css_framework: str = "bootstrap"
+    auth_framework: str = "django"
+    add_pytest:   bool = False
+    skip_auth_app: bool = False
+    custom_user:  bool = False
+    run_migrations: bool = True
 
     @property
     def path(self) -> Path:
@@ -107,7 +114,7 @@ async def create_project(
 ) -> AsyncGenerator[tuple[str, StepResult], None]:
     """
     Yields (step_id, StepResult) tuples as each step completes.
-    Steps: mkdir, venv, activate, install, startproject, lockfile
+    Steps: mkdir, venv, activate, install, startproject, lockfile, auth, migrate
     """
     uv = uv_cmd(ensure=True)
 
@@ -209,6 +216,50 @@ async def create_project(
         message="pyproject.toml + uv.lock generated" if result.returncode == 0 else "Lock generation failed",
         detail=_combined_output(result),
     )
+    if result.returncode != 0:
+        return
+
+    await asyncio.sleep(0.2)
+
+    # 6b. Static/media + base template + helper JS
+    ok, detail = await _setup_project_assets(cfg)
+    yield "assets", StepResult(
+        ok=ok,
+        message="Static/media + base template created" if ok else "Static/media setup failed",
+        detail=detail,
+    )
+    if not ok:
+        return
+
+    await asyncio.sleep(0.2)
+
+    # 7. Auth app + scaffolding (optional)
+    if cfg.skip_auth_app:
+        yield "auth", StepResult(ok=True, message="Auth scaffold skipped")
+    else:
+        ok, detail = await _setup_auth_scaffold(cfg)
+        yield "auth", StepResult(
+            ok=ok,
+            message="Authentication scaffold created" if ok else "Auth scaffold failed",
+            detail=detail,
+        )
+        if not ok:
+            return
+
+    await asyncio.sleep(0.2)
+
+    # 8. Migrations (optional)
+    if cfg.run_migrations and not cfg.skip_auth_app:
+        ok, detail = await _run_migrations(cfg)
+        yield "migrate", StepResult(
+            ok=ok,
+            message="Database migrations applied" if ok else "Migrations failed",
+            detail=detail,
+        )
+        if not ok:
+            return
+    else:
+        yield "migrate", StepResult(ok=True, message="Migrations skipped")
 
 
 # ── Django command runner ────────────────────────────────────────────────────
@@ -359,6 +410,632 @@ def _combined_output(result: subprocess.CompletedProcess) -> str:
     if out and err:
         return out + "\n" + err
     return out or err
+
+
+async def _run_manage(cfg: ProjectConfig, args: list[str]) -> subprocess.CompletedProcess:
+    manage_py = cfg.path / "manage.py"
+    return await _run(
+        [str(_python_bin(cfg.path, cfg.venv_path)), str(manage_py), *args],
+        cwd=cfg.path,
+        env=_venv_env(cfg),
+    )
+
+
+async def _setup_auth_scaffold(cfg: ProjectConfig) -> tuple[bool, str]:
+    """Create authentication app, templates, and settings/urls wiring."""
+    # 1) startapp authentication
+    result = await _run_manage(cfg, ["startapp", "authentication"])
+    if result.returncode != 0:
+        return False, _combined_output(result)
+
+    # 2) write app files
+    auth_dir = cfg.path / "authentication"
+    templates_dir = auth_dir / "templates"
+    _write_file(auth_dir / "urls.py", _auth_urls(cfg.auth_framework))
+    _write_file(auth_dir / "views.py", _auth_views(cfg.auth_framework))
+    _write_file(auth_dir / "forms.py", _auth_forms())
+
+    _write_file(templates_dir / "authentication" / "base.html", _auth_base_template(cfg.css_framework))
+    if cfg.auth_framework == "allauth":
+        _write_file(templates_dir / "account" / "login.html", _allauth_login_template(cfg.css_framework))
+        _write_file(templates_dir / "account" / "signup.html", _allauth_signup_template(cfg.css_framework))
+        _write_file(templates_dir / "account" / "logout.html", _allauth_logout_template(cfg.css_framework))
+    else:
+        _write_file(templates_dir / "authentication" / "login.html", _auth_login_template(cfg.css_framework))
+        _write_file(templates_dir / "authentication" / "signup.html", _auth_signup_template(cfg.css_framework))
+
+    # 3) update project settings + urls
+    settings_path = cfg.path / cfg.name / "settings.py"
+    urls_path = cfg.path / cfg.name / "urls.py"
+    if settings_path.exists():
+        settings_text = settings_path.read_text(encoding="utf-8")
+        settings_text = _insert_list_entries(
+            settings_text,
+            "INSTALLED_APPS",
+            ["authentication"] + _auth_installed_apps(cfg.auth_framework),
+        )
+    if cfg.auth_framework == "allauth":
+        settings_text = _append_if_missing(
+            settings_text,
+            "\nSITE_ID = 1\n",
+        )
+            settings_text = _append_if_missing(
+                settings_text,
+                "\nAUTHENTICATION_BACKENDS = [\n"
+                "    \"django.contrib.auth.backends.ModelBackend\",\n"
+                "    \"allauth.account.auth_backends.AuthenticationBackend\",\n"
+                "]\n",
+            )
+    if cfg.custom_user:
+        settings_text = _append_if_missing(
+            settings_text,
+            "\nAUTH_USER_MODEL = \"authentication.CustomUser\"\n",
+        )
+        if cfg.interactive == "htmx":
+            settings_text = _insert_list_entries(
+                settings_text,
+                "MIDDLEWARE",
+                ["django_htmx.middleware.HtmxMiddleware"],
+            )
+        settings_path.write_text(settings_text, encoding="utf-8")
+
+    if urls_path.exists():
+        urls_text = urls_path.read_text(encoding="utf-8")
+        urls_text = _ensure_include_import(urls_text)
+        urls_text = _insert_list_entries(
+            urls_text,
+            "urlpatterns",
+            ["path(\"auth/\", include(\"authentication.urls\"))"]
+            + (["path(\"accounts/\", include(\"allauth.urls\"))"] if cfg.auth_framework == "allauth" else []),
+        )
+        urls_path.write_text(urls_text, encoding="utf-8")
+
+    # 4) custom user model
+    if cfg.custom_user:
+        _write_file(auth_dir / "models.py", _auth_models_custom_user())
+
+    return True, "authentication app + templates generated"
+
+
+async def _setup_project_assets(cfg: ProjectConfig) -> tuple[bool, str]:
+    """Create static/media dirs and base templates per CSS/JS choices."""
+    settings_path = cfg.path / cfg.name / "settings.py"
+    if not settings_path.exists():
+        return False, "settings.py not found"
+
+    static_dir = cfg.path / "static"
+    media_dir = cfg.path / "media"
+    static_dir.mkdir(parents=True, exist_ok=True)
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    js_dir = static_dir / "js"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    _write_file(js_dir / "ajax.js", _ajax_helper_js())
+    _write_file(js_dir / "jquery.js", _jquery_helper_js())
+
+    templates_dir = cfg.path / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    _write_file(templates_dir / "base.html", _base_template(cfg.css_framework, cfg.interactive))
+
+    settings_text = settings_path.read_text(encoding="utf-8")
+    settings_text = _append_if_missing(
+        settings_text,
+        "\n# Static & media\n"
+        "STATIC_URL = \"static/\"\n"
+        "STATICFILES_DIRS = [BASE_DIR / \"static\"]\n"
+        "MEDIA_URL = \"media/\"\n"
+        "MEDIA_ROOT = BASE_DIR / \"media\"\n",
+    )
+    settings_path.write_text(settings_text, encoding="utf-8")
+
+    # Create a modern homepage + skeleton app when a CSS framework is chosen
+    if cfg.css_framework != "none":
+        ok, detail = await _setup_skeleton_app(cfg)
+        if not ok:
+            return False, detail
+    return True, "static/media + base template created"
+
+
+async def _setup_skeleton_app(cfg: ProjectConfig) -> tuple[bool, str]:
+    """Create a minimal skeleton app with a modern homepage."""
+    result = await _run_manage(cfg, ["startapp", "skeleton"])
+    if result.returncode != 0:
+        return False, _combined_output(result)
+
+    skel_dir = cfg.path / "skeleton"
+    _write_file(skel_dir / "urls.py", _skeleton_urls())
+    _write_file(skel_dir / "views.py", _skeleton_views())
+    _write_file(
+        skel_dir / "templates" / "skeleton" / "home.html",
+        _skeleton_home_template(cfg.css_framework),
+    )
+
+    settings_path = cfg.path / cfg.name / "settings.py"
+    if settings_path.exists():
+        settings_text = settings_path.read_text(encoding="utf-8")
+        settings_text = _insert_list_entries(
+            settings_text,
+            "INSTALLED_APPS",
+            ["skeleton"],
+        )
+        settings_path.write_text(settings_text, encoding="utf-8")
+
+    urls_path = cfg.path / cfg.name / "urls.py"
+    if urls_path.exists():
+        urls_text = urls_path.read_text(encoding="utf-8")
+        urls_text = _ensure_include_import(urls_text)
+        urls_text = _insert_list_entries(
+            urls_text,
+            "urlpatterns",
+            ["path(\"\", include(\"skeleton.urls\"))"],
+        )
+        urls_path.write_text(urls_text, encoding="utf-8")
+
+    return True, "skeleton app + homepage created"
+
+
+async def _run_migrations(cfg: ProjectConfig) -> tuple[bool, str]:
+    result = await _run_manage(cfg, ["makemigrations", "authentication"])
+    if result.returncode != 0:
+        return False, _combined_output(result)
+    result = await _run_manage(cfg, ["migrate"])
+    if result.returncode != 0:
+        return False, _combined_output(result)
+    return True, _combined_output(result)
+
+
+def _write_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _auth_installed_apps(auth_framework: str) -> list[str]:
+    if auth_framework != "allauth":
+        return []
+    return [
+        "django.contrib.sites",
+        "allauth",
+        "allauth.account",
+        "allauth.socialaccount",
+    ]
+
+
+def _auth_urls(auth_framework: str) -> str:
+    if auth_framework == "allauth":
+        return (
+            "from django.urls import path\n"
+            "from django.views.generic import RedirectView\n\n"
+            "app_name = \"auth\"\n\n"
+            "urlpatterns = [\n"
+            "    path(\"login/\", RedirectView.as_view(url=\"/accounts/login/\"), name=\"login\"),\n"
+            "    path(\"logout/\", RedirectView.as_view(url=\"/accounts/logout/\"), name=\"logout\"),\n"
+            "    path(\"signup/\", RedirectView.as_view(url=\"/accounts/signup/\"), name=\"signup\"),\n"
+            "]\n"
+        )
+    return (
+        "from django.urls import path\n"
+        "from . import views\n\n"
+        "app_name = \"auth\"\n\n"
+        "urlpatterns = [\n"
+        "    path(\"login/\", views.login_view, name=\"login\"),\n"
+        "    path(\"logout/\", views.logout_view, name=\"logout\"),\n"
+        "    path(\"signup/\", views.signup_view, name=\"signup\"),\n"
+        "]\n"
+    )
+
+
+def _auth_views(auth_framework: str) -> str:
+    if auth_framework == "allauth":
+        return (
+            "from django.shortcuts import redirect\n\n"
+            "def login_view(request):\n"
+            "    return redirect(\"/accounts/login/\")\n\n"
+            "def logout_view(request):\n"
+            "    return redirect(\"/accounts/logout/\")\n\n"
+            "def signup_view(request):\n"
+            "    return redirect(\"/accounts/signup/\")\n"
+        )
+    return (
+        "from django.contrib.auth import login, logout\n"
+        "from django.contrib.auth.forms import AuthenticationForm\n"
+        "from django.shortcuts import render, redirect\n"
+        "from .forms import CustomUserCreationForm\n\n"
+        "def login_view(request):\n"
+        "    form = AuthenticationForm(request, data=request.POST or None)\n"
+        "    if request.method == \"POST\" and form.is_valid():\n"
+        "        login(request, form.get_user())\n"
+        "        return redirect(\"auth:login\")\n"
+        "    return render(request, \"authentication/login.html\", {\"form\": form})\n\n"
+        "def logout_view(request):\n"
+        "    logout(request)\n"
+        "    return redirect(\"auth:login\")\n\n"
+        "def signup_view(request):\n"
+        "    form = CustomUserCreationForm(request.POST or None)\n"
+        "    if request.method == \"POST\" and form.is_valid():\n"
+        "        user = form.save()\n"
+        "        login(request, user)\n"
+        "        return redirect(\"auth:login\")\n"
+        "    return render(request, \"authentication/signup.html\", {\"form\": form})\n"
+    )
+
+
+def _auth_forms() -> str:
+    return (
+        "from django.contrib.auth import get_user_model\n"
+        "from django.contrib.auth.forms import UserCreationForm\n\n"
+        "class CustomUserCreationForm(UserCreationForm):\n"
+        "    class Meta(UserCreationForm.Meta):\n"
+        "        model = get_user_model()\n"
+        "        fields = (\"username\", \"email\")\n"
+    )
+
+
+def _auth_models_custom_user() -> str:
+    return (
+        "from django.contrib.auth.models import AbstractUser\n\n"
+        "class CustomUser(AbstractUser):\n"
+        "    pass\n"
+    )
+
+
+def _auth_base_template(css_framework: str) -> str:
+    if css_framework == "tailwind":
+        head_css = "<script src=\"https://cdn.tailwindcss.com\"></script>"
+        body_cls = "bg-slate-100 text-slate-900 min-h-screen"
+        header = (
+            "<header class=\"bg-slate-900 text-white\">\n"
+            "  <div class=\"max-w-3xl mx-auto px-4 py-3\">\n"
+            "    <div class=\"text-lg font-semibold\">Django Manager</div>\n"
+            "  </div>\n"
+            "</header>\n"
+        )
+        main_open = "<main class=\"max-w-3xl mx-auto px-4 py-8\">"
+    else:
+        head_css = (
+            "<link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css\" "
+            "rel=\"stylesheet\">"
+        )
+        body_cls = "bg-light"
+        header = (
+            "<nav class=\"navbar navbar-dark bg-dark\">\n"
+            "  <div class=\"container\">\n"
+            "    <span class=\"navbar-brand mb-0 h1\">Django Manager</span>\n"
+            "  </div>\n"
+            "</nav>\n"
+        )
+        main_open = "<main class=\"container py-4\">"
+
+    form_style = (
+        "<style>\n"
+        "form input, form select, form textarea {\n"
+        "  width: 100%; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;\n"
+        "  border: 1px solid #d1d5db; border-radius: 0.375rem;\n"
+        "}\n"
+        "form button { padding: 0.5rem 1rem; border-radius: 0.375rem; }\n"
+        "</style>\n"
+    )
+
+    return (
+        "<!doctype html>\n"
+        "<html>\n"
+        "<head>\n"
+        "  <meta charset=\"utf-8\" />\n"
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+        f"  {head_css}\n"
+        f"  {form_style}\n"
+        "  <title>Authentication</title>\n"
+        "</head>\n"
+        f"<body class=\"{body_cls}\">\n"
+        f"{header}\n"
+        f"{main_open}\n"
+        "  {% block content %}{% endblock %}\n"
+        "  </main>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _auth_login_template(css_framework: str) -> str:
+    card_open, card_close, btn_cls, link_cls = _auth_ui_classes(css_framework)
+    return (
+        "{% extends \"authentication/base.html\" %}\n"
+        "{% block content %}\n"
+        f"{card_open}\n"
+        "<h2>Login</h2>\n"
+        "<form method=\"post\">{% csrf_token %}{{ form.as_p }}\n"
+        f"<button type=\"submit\" class=\"{btn_cls}\">Login</button></form>\n"
+        f"<p class=\"mt-3\">No account? <a class=\"{link_cls}\" href=\"{{% url 'auth:signup' %}}\">Sign up</a></p>\n"
+        f"{card_close}\n"
+        "{% endblock %}\n"
+    )
+
+
+def _auth_signup_template(css_framework: str) -> str:
+    card_open, card_close, btn_cls, link_cls = _auth_ui_classes(css_framework)
+    return (
+        "{% extends \"authentication/base.html\" %}\n"
+        "{% block content %}\n"
+        f"{card_open}\n"
+        "<h2>Sign Up</h2>\n"
+        "<form method=\"post\">{% csrf_token %}{{ form.as_p }}\n"
+        f"<button type=\"submit\" class=\"{btn_cls}\">Create account</button></form>\n"
+        f"<p class=\"mt-3\">Already have an account? <a class=\"{link_cls}\" href=\"{{% url 'auth:login' %}}\">Login</a></p>\n"
+        f"{card_close}\n"
+        "{% endblock %}\n"
+    )
+
+
+def _allauth_login_template(css_framework: str) -> str:
+    card_open, card_close, btn_cls, link_cls = _auth_ui_classes(css_framework)
+    return (
+        "{% extends \"authentication/base.html\" %}\n"
+        "{% block content %}\n"
+        f"{card_open}\n"
+        "<h2>Login</h2>\n"
+        "<form method=\"post\">{% csrf_token %}{{ form.as_p }}\n"
+        f"<button type=\"submit\" class=\"{btn_cls}\">Login</button></form>\n"
+        f"<p class=\"mt-3\">No account? <a class=\"{link_cls}\" href=\"{{% url 'account_signup' %}}\">Sign up</a></p>\n"
+        f"{card_close}\n"
+        "{% endblock %}\n"
+    )
+
+
+def _allauth_signup_template(css_framework: str) -> str:
+    card_open, card_close, btn_cls, link_cls = _auth_ui_classes(css_framework)
+    return (
+        "{% extends \"authentication/base.html\" %}\n"
+        "{% block content %}\n"
+        f"{card_open}\n"
+        "<h2>Sign Up</h2>\n"
+        "<form method=\"post\">{% csrf_token %}{{ form.as_p }}\n"
+        f"<button type=\"submit\" class=\"{btn_cls}\">Create account</button></form>\n"
+        f"<p class=\"mt-3\">Already have an account? <a class=\"{link_cls}\" href=\"{{% url 'account_login' %}}\">Login</a></p>\n"
+        f"{card_close}\n"
+        "{% endblock %}\n"
+    )
+
+
+def _allauth_logout_template(css_framework: str) -> str:
+    card_open, card_close, btn_cls, _ = _auth_ui_classes(css_framework)
+    return (
+        "{% extends \"authentication/base.html\" %}\n"
+        "{% block content %}\n"
+        f"{card_open}\n"
+        "<h2>Logout</h2>\n"
+        "<form method=\"post\">{% csrf_token %}\n"
+        f"<button type=\"submit\" class=\"{btn_cls}\">Logout</button></form>\n"
+        f"{card_close}\n"
+        "{% endblock %}\n"
+    )
+
+
+def _auth_ui_classes(css_framework: str) -> tuple[str, str, str, str]:
+    if css_framework == "tailwind":
+        card_open = "<div class=\"max-w-md mx-auto bg-white p-6 rounded shadow\">"
+        card_close = "</div>"
+        btn_cls = "px-4 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700"
+        link_cls = "text-emerald-700 hover:underline"
+    else:
+        card_open = "<div class=\"row justify-content-center\"><div class=\"col-md-6\"><div class=\"card shadow-sm\"><div class=\"card-body\">"
+        card_close = "</div></div></div></div>"
+        btn_cls = "btn btn-primary"
+        link_cls = "link-primary"
+    return card_open, card_close, btn_cls, link_cls
+
+
+def _insert_list_entries(text: str, list_name: str, entries: list[str]) -> str:
+    lines = text.splitlines()
+    start_idx = None
+    end_idx = None
+    for i, line in enumerate(lines):
+        if start_idx is None and line.strip().startswith(f"{list_name}"):
+            start_idx = i
+            continue
+        if start_idx is not None and "]" in line:
+            end_idx = i
+            break
+    if start_idx is None or end_idx is None:
+        return text
+
+    # Determine indent from first list item or closing line
+    indent = "    "
+    for j in range(start_idx + 1, end_idx):
+        if lines[j].strip():
+            indent = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
+            break
+    existing = "\n".join(lines[start_idx + 1 : end_idx])
+    to_add = []
+    for entry in entries:
+        if entry in existing:
+            continue
+        if entry.startswith("path("):
+            to_add.append(f"{indent}{entry},")
+        else:
+            to_add.append(f"{indent}\"{entry}\",")
+    if not to_add:
+        return text
+    lines[end_idx:end_idx] = to_add
+    return "\n".join(lines)
+
+
+def _append_if_missing(text: str, snippet: str) -> str:
+    if snippet.strip() in text:
+        return text
+    return text.rstrip() + "\n" + snippet
+
+
+def _ensure_include_import(text: str) -> str:
+    for i, line in enumerate(text.splitlines()):
+        if line.startswith("from django.urls import"):
+            if "include" in line:
+                return text
+            if line.endswith("path"):
+                return text.replace(line, line + ", include")
+            return text
+    return "from django.urls import path, include\n" + text
+
+
+def _base_template(css_framework: str, interactive: str) -> str:
+    if css_framework == "tailwind":
+        css = "<script src=\"https://cdn.tailwindcss.com\"></script>"
+    elif css_framework == "bootstrap":
+        css = (
+            "<link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css\" "
+            "rel=\"stylesheet\">"
+        )
+    else:
+        css = ""
+    if interactive == "jquery":
+        js = (
+            "<script src=\"https://code.jquery.com/jquery-3.7.1.min.js\"></script>\n"
+            "<script src=\"/static/js/jquery.js\"></script>"
+        )
+    elif interactive == "ajax":
+        js = "<script src=\"/static/js/ajax.js\"></script>"
+    else:
+        js = "<script src=\"https://unpkg.com/htmx.org@1.9.10\"></script>"
+    return (
+        "<!doctype html>\n"
+        "<html>\n"
+        "<head>\n"
+        "  <meta charset=\"utf-8\" />\n"
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+        f"  {css}\n"
+        "</head>\n"
+        "<body class=\"bg-light\">\n"
+        "  <div class=\"container py-5\">\n"
+        "    <h1>Django Manager</h1>\n"
+        "    <p>Starter layout ready.</p>\n"
+        "    {% block content %}{% endblock %}\n"
+        "  </div>\n"
+        f"  {js}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _ajax_helper_js() -> str:
+    return (
+        "async function postJSON(url, data) {\n"
+        "  const resp = await fetch(url, {\n"
+        "    method: 'POST',\n"
+        "    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },\n"
+        "    body: JSON.stringify(data)\n"
+        "  });\n"
+        "  return await resp.json();\n"
+        "}\n"
+    )
+
+
+def _jquery_helper_js() -> str:
+    return (
+        "function postJSON(url, data, cb) {\n"
+        "  $.ajax({\n"
+        "    url: url,\n"
+        "    method: 'POST',\n"
+        "    contentType: 'application/json',\n"
+        "    data: JSON.stringify(data),\n"
+        "    success: cb,\n"
+        "  });\n"
+        "}\n"
+    )
+
+
+def _skeleton_urls() -> str:
+    return (
+        "from django.urls import path\n"
+        "from . import views\n\n"
+        "urlpatterns = [\n"
+        "    path(\"\", views.home, name=\"home\"),\n"
+        "]\n"
+    )
+
+
+def _skeleton_views() -> str:
+    return (
+        "from django import get_version\n"
+        "from django.shortcuts import render\n\n"
+        "def home(request):\n"
+        "    return render(request, \"skeleton/home.html\", {\"django_version\": get_version()})\n"
+    )
+
+
+def _skeleton_home_template(css_framework: str) -> str:
+    if css_framework == "tailwind":
+        return (
+            "{% extends \"base.html\" %}\n"
+            "{% block content %}\n"
+            "<div class=\"bg-white rounded-xl shadow p-8\">\n"
+            "  <div class=\"flex items-center gap-4\">\n"
+            "    <div class=\"w-16 h-16 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-3xl font-bold\">DM</div>\n"
+            "    <div>\n"
+            "      <h1 class=\"text-2xl font-semibold\">Django Manager</h1>\n"
+            "      <p class=\"text-slate-600\">Your project is ready and configured.</p>\n"
+            "    </div>\n"
+            "  </div>\n"
+            "  <div class=\"mt-6 grid gap-4 md:grid-cols-3\">\n"
+            "    <div class=\"border rounded-lg p-4\">\n"
+            "      <h3 class=\"font-semibold\">Auth Ready</h3>\n"
+            "      <p class=\"text-slate-600 text-sm\">Login, signup, and logout flows scaffolded.</p>\n"
+            "    </div>\n"
+            "    <div class=\"border rounded-lg p-4\">\n"
+            "      <h3 class=\"font-semibold\">Static + Media</h3>\n"
+            "      <p class=\"text-slate-600 text-sm\">Static and media folders configured.</p>\n"
+            "    </div>\n"
+            "    <div class=\"border rounded-lg p-4\">\n"
+            "      <h3 class=\"font-semibold\">Interactive UI</h3>\n"
+            "      <p class=\"text-slate-600 text-sm\">HTMX/Ajax/jQuery helpers included.</p>\n"
+            "    </div>\n"
+            "  </div>\n"
+            "  <div class=\"mt-6 flex flex-wrap items-center gap-3\">\n"
+            "    <span class=\"px-3 py-1 text-sm rounded-full bg-emerald-50 text-emerald-700\">Success</span>\n"
+            "    <span class=\"text-sm text-slate-600\">Django {{ django_version }}</span>\n"
+            "    <a class=\"text-sm text-emerald-700 underline\" href=\"https://docs.djangoproject.com/\">Django Docs</a>\n"
+            "  </div>\n"
+            "</div>\n"
+            "{% endblock %}\n"
+        )
+    return (
+        "{% extends \"base.html\" %}\n"
+        "{% block content %}\n"
+        "<div class=\"card shadow-sm\">\n"
+        "  <div class=\"card-body\">\n"
+        "    <div class=\"d-flex align-items-center gap-3\">\n"
+        "      <div class=\"rounded bg-success text-white d-flex align-items-center justify-content-center\" style=\"width:64px;height:64px;font-size:28px;font-weight:700;\">DM</div>\n"
+        "      <div>\n"
+        "        <h1 class=\"h4 mb-0\">Django Manager</h1>\n"
+        "        <p class=\"text-muted mb-0\">Your project is ready and configured.</p>\n"
+        "      </div>\n"
+        "    </div>\n"
+        "    <div class=\"row mt-4 g-3\">\n"
+        "      <div class=\"col-md-4\">\n"
+        "        <div class=\"border rounded p-3 h-100\">\n"
+        "          <h5 class=\"mb-2\">Auth Ready</h5>\n"
+        "          <p class=\"text-muted small\">Login, signup, and logout flows scaffolded.</p>\n"
+        "        </div>\n"
+        "      </div>\n"
+        "      <div class=\"col-md-4\">\n"
+        "        <div class=\"border rounded p-3 h-100\">\n"
+        "          <h5 class=\"mb-2\">Static + Media</h5>\n"
+        "          <p class=\"text-muted small\">Static and media folders configured.</p>\n"
+        "        </div>\n"
+        "      </div>\n"
+        "      <div class=\"col-md-4\">\n"
+        "        <div class=\"border rounded p-3 h-100\">\n"
+        "          <h5 class=\"mb-2\">Interactive UI</h5>\n"
+        "          <p class=\"text-muted small\">HTMX/Ajax/jQuery helpers included.</p>\n"
+        "        </div>\n"
+        "      </div>\n"
+        "    </div>\n"
+        "    <div class=\"mt-4 d-flex align-items-center gap-3 flex-wrap\">\n"
+        "      <span class=\"badge bg-success\">Success</span>\n"
+        "      <span class=\"text-muted\">Django {{ django_version }}</span>\n"
+        "      <a href=\"https://docs.djangoproject.com/\" class=\"link-primary\">Django Docs</a>\n"
+        "    </div>\n"
+        "  </div>\n"
+        "</div>\n"
+        "{% endblock %}\n"
+    )
 
 
 def ensure_pyproject(cfg: ProjectConfig) -> None:
