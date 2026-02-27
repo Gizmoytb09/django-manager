@@ -528,50 +528,41 @@ async def _setup_project_assets(cfg: ProjectConfig) -> tuple[bool, str]:
     )
     settings_path.write_text(settings_text, encoding="utf-8")
 
-    # Create a modern homepage + skeleton app when a CSS framework is chosen
+    # Create a modern homepage when a CSS framework is chosen
     if cfg.css_framework != "none":
-        ok, detail = await _setup_skeleton_app(cfg)
+        ok, detail = _setup_homepage(cfg)
         if not ok:
             return False, detail
     return True, "static/media + base template created"
 
 
-async def _setup_skeleton_app(cfg: ProjectConfig) -> tuple[bool, str]:
-    """Create a minimal skeleton app with a modern homepage."""
-    result = await _run_manage(cfg, ["startapp", "skeleton"])
-    if result.returncode != 0:
-        return False, _combined_output(result)
-
-    skel_dir = cfg.path / "skeleton"
-    _write_file(skel_dir / "urls.py", _skeleton_urls())
-    _write_file(skel_dir / "views.py", _skeleton_views())
-    _write_file(
-        skel_dir / "templates" / "skeleton" / "home.html",
-        _skeleton_home_template(cfg.css_framework),
-    )
+def _setup_homepage(cfg: ProjectConfig) -> tuple[bool, str]:
+    """Create a modern homepage template and wire it to root URL."""
+    templates_dir = cfg.path / "templates"
+    _write_file(templates_dir / "home.html", _skeleton_home_template(cfg.css_framework))
 
     settings_path = cfg.path / cfg.name / "settings.py"
     if settings_path.exists():
         settings_text = settings_path.read_text(encoding="utf-8")
-        settings_text = _insert_list_entries(
+        settings_text = _append_if_missing(
             settings_text,
-            "INSTALLED_APPS",
-            ["skeleton"],
+            "\n# Templates\n"
+            "TEMPLATES[0][\"DIRS\"] = [BASE_DIR / \"templates\"]\n",
         )
         settings_path.write_text(settings_text, encoding="utf-8")
 
     urls_path = cfg.path / cfg.name / "urls.py"
     if urls_path.exists():
         urls_text = urls_path.read_text(encoding="utf-8")
-        urls_text = _ensure_include_import(urls_text)
+        urls_text = _ensure_templateview_import(urls_text)
         urls_text = _insert_list_entries(
             urls_text,
             "urlpatterns",
-            ["path(\"\", include(\"skeleton.urls\"))"],
+            ["path(\"\", TemplateView.as_view(template_name=\"home.html\"), name=\"home\")"],
         )
         urls_path.write_text(urls_text, encoding="utf-8")
 
-    return True, "skeleton app + homepage created"
+    return True, "homepage created"
 
 
 async def _run_migrations(cfg: ProjectConfig) -> tuple[bool, str]:
@@ -873,6 +864,17 @@ def _ensure_include_import(text: str) -> str:
                 return text.replace(line, line + ", include")
             return text
     return "from django.urls import path, include\n" + text
+
+
+def _ensure_templateview_import(text: str) -> str:
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("from django.views.generic import"):
+            if "TemplateView" in line:
+                return text
+            lines[i] = line + ", TemplateView"
+            return "\n".join(lines)
+    return "from django.views.generic import TemplateView\n" + text
 
 
 def _base_template(css_framework: str, interactive: str) -> str:
