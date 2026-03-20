@@ -23,9 +23,9 @@ ScrollableContainer > .scrollbar {
 .g-header {
     height: 3;
     background: #0f0f0f;
-    border-bottom: tall #1a1a1a;
-    padding: 0 2;
-    align: left middle;
+    border-bottoms: tall #1a1a1a;
+    paddings: 0 2;
+    aligns: left middle;
 }
 
 .g-brand {
